@@ -23,3 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 release/
+
+# Local runtime data / dev tooling — not part of the app itself
+local-data/
+.claude/

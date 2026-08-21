@@ -6,12 +6,24 @@ import {
   Settings, ChevronRight, Search, TrendingUp, AlertTriangle, Wallet, X, Download, Upload,
 } from "lucide-react";
 import { BarChart, Bar, ResponsiveContainer, XAxis, Tooltip } from "recharts";
+import * as XLSX from "xlsx";
 
 /* ---------------------------------------------------------------- */
 /* Shared mock data                                                  */
 /* ---------------------------------------------------------------- */
 
-const TODAY_STR = "21.08.2026";
+const TODAY_STR = "21.08.2026"; // only used for the built-in demo/seed data below
+
+const pad2 = (n) => String(n).padStart(2, "0");
+// Real "now", formatted the same way the rest of the app stores dates (DD.MM.YYYY[ HH:MM]).
+const nowDateStr = () => {
+  const d = new Date();
+  return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}`;
+};
+const nowStr = () => {
+  const d = new Date();
+  return `${nowDateStr()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+};
 
 const INITIAL_PRODUCTS = [
   { kod: "5449000000996", ad: "Coca Cola 1L", kat: "İçkilər", alish: 1.2, satish: 1.6, endirim: 0, stok: 84, minimum: 20, novu: "eded", tereziKodu: "" },
@@ -69,7 +81,7 @@ const INITIAL_SUPPLIERS = [
 ];
 
 const INITIAL_SETTINGS = {
-  magazaAdi: "ZƏHRƏ MARKET",
+  magazaAdi: "ZƏHRA MARKET",
   voen: "1234567891",
   telefon: "012 123 45 67",
   unvan: "Bakı şəhəri, Nəsimi r-nu",
@@ -172,10 +184,26 @@ const useMarket = () => useContext(MarketContext);
 
 const emptyState = { products: [], sales: [], employees: [], suppliers: [], settings: INITIAL_SETTINGS };
 
+const PENDING_SALES_KEY = "zehra_pending_sales";
+
 function MarketProvider({ children, serverUrl, token = "" }) {
   const [state, setState] = useState(emptyState);
   const [connected, setConnected] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [pendingSales, setPendingSales] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(PENDING_SALES_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
+  const pendingRef = React.useRef(pendingSales);
+  pendingRef.current = pendingSales;
+
+  const persistPending = (list) => {
+    setPendingSales(list);
+    localStorage.setItem(PENDING_SALES_KEY, JSON.stringify(list));
+  };
 
   const authHeaders = () => (token ? { "x-api-token": token } : {});
 
@@ -222,9 +250,37 @@ function MarketProvider({ children, serverUrl, token = "" }) {
   const deleteProduct = (kod) => call("DELETE", `/api/products/${encodeURIComponent(kod)}`);
   const adjustStock = (kod, newStok) => updateProduct(kod, { stok: newStok });
   const addSupplier = (s) => call("POST", "/api/suppliers", s);
+  const updateSupplier = (ad, patch) => call("PUT", `/api/suppliers/${encodeURIComponent(ad)}`, patch);
+  const deleteSupplier = (ad) => call("DELETE", `/api/suppliers/${encodeURIComponent(ad)}`);
   const addEmployee = (e) => call("POST", "/api/employees", e);
   const deleteEmployee = (ad) => call("DELETE", `/api/employees/${encodeURIComponent(ad)}`);
-  const addSale = (sale) => call("POST", "/api/sales", sale);
+
+  // A sale must never be lost just because the Kassa lost its connection to
+  // the Admin PC mid-shift. If the POST fails, the sale is kept in a local
+  // queue (also persisted to localStorage, so it survives a page reload)
+  // and gets pushed to the server automatically once we're back online.
+  const addSale = async (sale) => {
+    const ok = await call("POST", "/api/sales", sale);
+    if (!ok) persistPending([...pendingRef.current, sale]);
+    return true; // the sale is captured either way — the receipt can proceed
+  };
+
+  React.useEffect(() => {
+    if (!connected || pendingRef.current.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const remaining = [...pendingRef.current];
+      while (remaining.length > 0 && !cancelled) {
+        const ok = await call("POST", "/api/sales", remaining[0]);
+        if (!ok) break; // still can't reach the server — stop, retry on next reconnect
+        remaining.shift();
+        persistPending(remaining);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [connected]);
   const setSettings = (s) => call("PUT", "/api/settings", s);
   const restoreBackup = (data) => call("POST", "/api/restore", data);
   const importProducts = (list) => call("POST", "/api/products/import", { products: list });
@@ -232,9 +288,11 @@ function MarketProvider({ children, serverUrl, token = "" }) {
 
   const value = {
     ...state,
+    sales: [...pendingSales.map((s) => ({ ...s, _pending: true })), ...state.sales],
+    pendingCount: pendingSales.length,
     connected, loading,
     addProduct, updateProduct, deleteProduct, adjustStock,
-    addSupplier, addEmployee, deleteEmployee, addSale, setSettings, restoreBackup,
+    addSupplier, updateSupplier, deleteSupplier, addEmployee, deleteEmployee, addSale, setSettings, restoreBackup,
     importProducts, resetSales,
   };
 
@@ -524,6 +582,7 @@ function KassaView() {
   const [lastSale, setLastSale] = useState(null);
   const [viewSale, setViewSale] = useState(null);
   const [scanMsg, setScanMsg] = useState(null);
+  const [lastAdded, setLastAdded] = useState(null);
 
   const lineTotal = (item) => item.qiymet * item.miqdar * (1 - item.endirim / 100);
   const subtotal = useMemo(() => cart.reduce((s, i) => s + lineTotal(i), 0), [cart]);
@@ -555,8 +614,18 @@ function KassaView() {
           endirim: product.endirim,
           miqdar: weightKg != null ? +weightKg.toFixed(3) : 1,
           novu: product.novu || "eded",
+          vahid: product.vahid || "ədəd",
         },
       ];
+    });
+    setLastAdded({
+      ad: product.ad,
+      kat: product.kat,
+      satish: product.satish,
+      endirim: product.endirim,
+      novu: product.novu || "eded",
+      vahid: product.vahid || "ədəd",
+      qty: weightKg != null ? +weightKg.toFixed(3) : 1,
     });
   };
 
@@ -588,6 +657,7 @@ function KassaView() {
     }
     if (confirmDeleteKod === "__ALL__") {
       setCart([]);
+      setLastAdded(null);
     } else {
       setCart((c) => c.filter((i) => i.kod !== confirmDeleteKod));
     }
@@ -712,7 +782,7 @@ function KassaView() {
     if (method === "nagd" && (parseFloat(received) || 0) < total) return;
     const sale = {
       no: generateSaleNo(sales),
-      tarix: `${TODAY_STR} 14:35`,
+      tarix: nowStr(),
       kassir: "Kassir 01",
       say: cart.length,
       meblegh: total,
@@ -729,6 +799,7 @@ function KassaView() {
     setPayOpen(false);
     setReceiptOpen(true);
     setCart([]);
+    setLastAdded(null);
     setDiscountPct("0");
   };
 
@@ -832,6 +903,23 @@ function KassaView() {
                   </div>
                 </button>
               ))}
+            </div>
+          ) : lastAdded ? (
+            <div className="h-full min-h-[420px] flex flex-col items-center justify-center text-center">
+              <div className="w-20 h-20 rounded-full bg-green-50 flex items-center justify-center mb-5">
+                <Check size={40} className="text-[#16a34a]" strokeWidth={2.5} />
+              </div>
+              <div className="text-xs font-semibold text-gray-400 tracking-wide mb-2">SON ƏLAVƏ OLUNAN</div>
+              <div className="font-black text-3xl mb-2 max-w-xl">{lastAdded.ad}</div>
+              {lastAdded.kat && <div className="text-sm text-gray-400 mb-4">{lastAdded.kat}</div>}
+              <div className="font-black text-5xl text-[#16a34a] mb-2">
+                {fmt(lastAdded.satish)} <span className="text-2xl">AZN</span>
+                {lastAdded.novu === "çəki" && <span className="text-2xl text-gray-400"> / kq</span>}
+              </div>
+              <div className="text-sm text-gray-400">
+                {lastAdded.novu === "çəki" ? `${lastAdded.qty.toFixed(3)} kq əlavə olundu` : `${lastAdded.qty} ${lastAdded.vahid || "ədəd"} əlavə olundu`}
+                {lastAdded.endirim > 0 && <span className="text-red-500 font-semibold"> · -{lastAdded.endirim}% endirim</span>}
+              </div>
             </div>
           ) : (
             <div className="h-full min-h-[420px] flex flex-col items-center justify-center text-center">
@@ -1086,7 +1174,7 @@ function KassaView() {
           <div className="bg-white rounded-2xl w-full max-w-xs p-6 font-mono text-xs">
             <div className="text-center mb-3">
               <div className="font-black text-sm">
-                <span className="text-[#16a34a]">ZƏHRƏ</span> <span className="text-[#ea580c]">MARKET</span>
+                <span className="text-[#2563eb]">ZƏHRA</span> <span className="text-[#eab308]">MARKET</span>
               </div>
               <div className="mt-1 text-[10px] text-gray-500 leading-relaxed">
                 {settings.magazaAdi}<br />
@@ -1169,6 +1257,7 @@ const NAV = [
   { key: "hesabatlar", label: "Hesabatlar", icon: FileBarChart2 },
   { key: "isciler", label: "İşçilər", icon: Users },
   { key: "techizatcilar", label: "Təchizatçılar", icon: Truck },
+  { key: "terezi", label: "Tərəzi", icon: ScanBarcode },
   { key: "backup", label: "Ehtiyat nüsxə", icon: Download },
   { key: "parametrler", label: "Parametrlər", icon: Settings },
 ];
@@ -1235,7 +1324,7 @@ function PageHeader({ title }) {
 
 function IcmalPage({ onNavigate }) {
   const { sales, products } = useMarket();
-  const bugunSales = sales.filter((s) => s.tarix && s.tarix.startsWith(TODAY_STR));
+  const bugunSales = sales.filter((s) => s.tarix && s.tarix.startsWith(nowDateStr()));
   const bugunMeblegh = bugunSales.reduce((sum, s) => sum + (s.meblegh || 0), 0);
   const stokDeyeri = products.reduce((sum, p) => sum + p.stok * p.alish, 0);
   const azalanStok = products.filter((p) => p.stok > 0 && p.stok < p.minimum).length;
@@ -1312,7 +1401,7 @@ function IcmalPage({ onNavigate }) {
   );
 }
 
-const emptyProductForm = { kod: "", ad: "", kat: "", alish: "", satish: "", endirim: "0", stok: "", minimum: "10", novu: "eded", tereziKodu: "" };
+const emptyProductForm = { kod: "", ad: "", kat: "", alish: "", satish: "", endirim: "0", stok: "", minimum: "10", novu: "eded", vahid: "ədəd", tereziKodu: "" };
 
 function MehsullarPage() {
   const { products, addProduct, updateProduct, deleteProduct, importProducts } = useMarket();
@@ -1338,7 +1427,7 @@ function MehsullarPage() {
       kod: p.kod, ad: p.ad, kat: p.kat,
       alish: String(p.alish), satish: String(p.satish),
       endirim: String(p.endirim), stok: String(p.stok), minimum: String(p.minimum),
-      novu: p.novu || "eded", tereziKodu: p.tereziKodu || "",
+      novu: p.novu || "eded", vahid: p.vahid || "ədəd", tereziKodu: p.tereziKodu || "",
     });
     setModalOpen(true);
   };
@@ -1355,6 +1444,7 @@ function MehsullarPage() {
       stok: parseInt(form.stok, 10) || 0,
       minimum: parseInt(form.minimum, 10) || 0,
       novu: form.novu === "çəki" ? "çəki" : "eded",
+      vahid: form.novu === "çəki" ? "kq" : form.vahid || "ədəd",
       tereziKodu: form.tereziKodu.trim(),
     };
     if (editing) updateProduct(editing.kod, payload);
@@ -1367,8 +1457,8 @@ function MehsullarPage() {
   };
 
   const downloadTemplate = () => {
-    const header = "Barkod,Ad,Kateqoriya,AlisQiymeti,SatisQiymeti,Endirim,Stok,Minimum,Novu,TereziKodu\n";
-    const example = "5449000000996,Coca Cola 1L,İçkilər,1.20,1.60,0,84,20,eded,\n";
+    const header = "Barkod,Ad,Kateqoriya,AlisQiymeti,SatisQiymeti,Endirim,Stok,Minimum,Novu,Vahid,TereziKodu\n";
+    const example = "5449000000996,Coca Cola 1L,İçkilər,1.20,1.60,0,84,20,eded,ədəd,\n";
     const blob = new Blob(["\uFEFF" + header + example], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1380,65 +1470,126 @@ function MehsullarPage() {
     URL.revokeObjectURL(url);
   };
 
+  // Exports every product currently in the database to Excel, so missing
+  // columns (price, stock...) can be filled in and re-imported — the import
+  // matches by Barkod and updates existing rows instead of duplicating them.
+  const exportProducts = () => {
+    const header = ["Barkod", "Ad", "Kateqoriya", "AlisQiymeti", "SatisQiymeti", "Endirim", "Stok", "Minimum", "Novu", "Vahid", "TereziKodu"];
+    const rows = products.map((p) => [p.kod, p.ad, p.kat, p.alish, p.satish, p.endirim, p.stok, p.minimum, p.novu, p.vahid || (p.novu === "çəki" ? "kq" : "ədəd"), p.tereziKodu]);
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+    ws["!cols"] = header.map((h) => ({ wch: h === "Ad" ? 40 : h === "Kateqoriya" ? 18 : 12 }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Məhsullar");
+    const buf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `zehra-market-mehsullar-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const pickImportFile = () => fileInputRef.current && fileInputRef.current.click();
+
+  // Turns a raw header+data grid (from either a parsed CSV file or an Excel
+  // sheet) into product records, matching columns by name regardless of order.
+  const rowsToProducts = (rows) => {
+    const header = rows[0].map((h) => String(h ?? "").trim().toLowerCase());
+    const findCol = (names) => header.findIndex((h) => names.includes(h));
+    const iKod = findCol(["barkod", "kod"]);
+    const iAd = findCol(["ad", "məhsul", "mehsul"]);
+    const iKat = findCol(["kateqoriya", "kat"]);
+    const iAlis = findCol(["alisqiymeti", "alış", "alis"]);
+    const iSatis = findCol(["satisqiymeti", "satış", "satis"]);
+    const iEndirim = findCol(["endirim"]);
+    const iStok = findCol(["stok"]);
+    const iMin = findCol(["minimum"]);
+    const iNovu = findCol(["novu", "növü"]);
+    const iVahid = findCol(["vahid", "ölçü vahidi", "olcu vahidi"]);
+    const iTerezi = findCol(["tereziKodu".toLowerCase(), "tərəzikodu"]);
+
+    const cell = (row, i) => String((i >= 0 ? row[i] : "") ?? "").trim();
+    const list = [];
+    for (let r = 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || row.every((c) => !String(c ?? "").trim())) continue;
+      const kod = cell(row, iKod);
+      const ad = cell(row, iAd);
+      if (!kod || !ad) continue;
+      list.push({
+        kod,
+        ad,
+        kat: cell(row, iKat) || "Digər",
+        alish: parseFloat(cell(row, iAlis).replace(",", ".")) || 0,
+        satish: parseFloat(cell(row, iSatis).replace(",", ".")) || 0,
+        endirim: parseFloat(cell(row, iEndirim)) || 0,
+        stok: parseInt(cell(row, iStok), 10) || 0,
+        minimum: parseInt(cell(row, iMin), 10) || 10,
+        novu: cell(row, iNovu) === "çəki" ? "çəki" : "eded",
+        vahid: cell(row, iVahid) || (cell(row, iNovu) === "çəki" ? "kq" : "ədəd"),
+        tereziKodu: cell(row, iTerezi),
+      });
+    }
+    return list;
+  };
+
+  const finishImport = async (list) => {
+    if (list.length === 0) {
+      setImportMsg({ text: "Uyğun sətir tapılmadı — sütun adlarını nümunə fayl ilə müqayisə edin.", isError: true });
+      setTimeout(() => setImportMsg(null), 4500);
+      return;
+    }
+    const ok = await importProducts(list);
+    setImportMsg({
+      text: ok ? `${list.length} məhsul idxal olundu (mövcud barkodlar yeniləndi).` : "İdxal alınmadı — server ilə əlaqəni yoxlayın.",
+      isError: !ok,
+    });
+    setTimeout(() => setImportMsg(null), 4500);
+  };
 
   const onImportFile = (e) => {
     const file = e.target.files && e.target.files[0];
     e.target.value = "";
     if (!file) return;
+    const isExcel = /\.xlsx?$/i.test(file.name);
+
+    if (isExcel) {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const wb = XLSX.read(reader.result, { type: "array" });
+          const sheet = wb.Sheets[wb.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" });
+          if (rows.length < 2) {
+            setImportMsg({ text: "Fayl boşdur və ya format səhvdir.", isError: true });
+            setTimeout(() => setImportMsg(null), 4500);
+            return;
+          }
+          await finishImport(rowsToProducts(rows));
+        } catch (err) {
+          setImportMsg({ text: "Excel faylı oxuna bilmədi — formatını yoxlayın.", isError: true });
+          setTimeout(() => setImportMsg(null), 4500);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = async () => {
       try {
         const rows = parseCSV(String(reader.result));
         if (rows.length < 2) {
           setImportMsg({ text: "Fayl boşdur və ya format səhvdir.", isError: true });
+          setTimeout(() => setImportMsg(null), 4500);
           return;
         }
-        const header = rows[0].map((h) => h.trim().toLowerCase());
-        const findCol = (names) => header.findIndex((h) => names.includes(h));
-        const iKod = findCol(["barkod", "kod"]);
-        const iAd = findCol(["ad", "məhsul", "mehsul"]);
-        const iKat = findCol(["kateqoriya", "kat"]);
-        const iAlis = findCol(["alisqiymeti", "alış", "alis"]);
-        const iSatis = findCol(["satisqiymeti", "satış", "satis"]);
-        const iEndirim = findCol(["endirim"]);
-        const iStok = findCol(["stok"]);
-        const iMin = findCol(["minimum"]);
-        const iNovu = findCol(["novu", "növü"]);
-        const iTerezi = findCol(["tereziKodu".toLowerCase(), "tərəzikodu"]);
-
-        const list = [];
-        for (let r = 1; r < rows.length; r++) {
-          const row = rows[r];
-          if (!row || row.every((c) => !c || !c.trim())) continue;
-          const kod = (iKod >= 0 ? row[iKod] : "").trim();
-          const ad = (iAd >= 0 ? row[iAd] : "").trim();
-          if (!kod || !ad) continue;
-          list.push({
-            kod,
-            ad,
-            kat: (iKat >= 0 ? row[iKat] : "").trim() || "Digər",
-            alish: parseFloat((iAlis >= 0 ? row[iAlis] : "0").replace(",", ".")) || 0,
-            satish: parseFloat((iSatis >= 0 ? row[iSatis] : "0").replace(",", ".")) || 0,
-            endirim: parseFloat(iEndirim >= 0 ? row[iEndirim] : "0") || 0,
-            stok: parseInt(iStok >= 0 ? row[iStok] : "0", 10) || 0,
-            minimum: parseInt(iMin >= 0 ? row[iMin] : "10", 10) || 10,
-            novu: iNovu >= 0 && (row[iNovu] || "").trim() === "çəki" ? "çəki" : "eded",
-            tereziKodu: (iTerezi >= 0 ? row[iTerezi] : "").trim(),
-          });
-        }
-        if (list.length === 0) {
-          setImportMsg({ text: "Uyğun sətir tapılmadı — sütun adlarını nümunə fayl ilə müqayisə edin.", isError: true });
-          return;
-        }
-        const ok = await importProducts(list);
-        setImportMsg({
-          text: ok ? `${list.length} məhsul idxal olundu (mövcud barkodlar yeniləndi).` : "İdxal alınmadı — server ilə əlaqəni yoxlayın.",
-          isError: !ok,
-        });
+        await finishImport(rowsToProducts(rows));
       } catch (err) {
         setImportMsg({ text: "Fayl oxuna bilmədi — CSV formatını yoxlayın.", isError: true });
-      } finally {
         setTimeout(() => setImportMsg(null), 4500);
       }
     };
@@ -1466,9 +1617,22 @@ function MehsullarPage() {
         <button onClick={downloadTemplate} className="border border-gray-200 text-gray-600 hover:border-gray-300 rounded-xl px-4 py-2.5 text-sm font-semibold whitespace-nowrap">
           Nümunə CSV
         </button>
-        <input ref={fileInputRef} type="file" accept=".csv,text/csv" onChange={onImportFile} className="hidden" />
+        <button
+          onClick={exportProducts}
+          disabled={products.length === 0}
+          className="border border-gray-200 text-gray-600 hover:border-gray-300 disabled:opacity-40 rounded-xl px-4 py-2.5 text-sm font-semibold flex items-center gap-2 whitespace-nowrap"
+        >
+          <Download size={16} /> SİYAHINI EXCEL-Ə ÇIXAR
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".csv,text/csv,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          onChange={onImportFile}
+          className="hidden"
+        />
         <button onClick={pickImportFile} className="border border-[#16a34a] text-[#16a34a] hover:bg-green-50 rounded-xl px-4 py-2.5 text-sm font-semibold flex items-center gap-2 whitespace-nowrap">
-          <Upload size={16} /> CSV İDXAL ET
+          <Upload size={16} /> EXCEL/CSV İDXAL ET
         </button>
         <button onClick={openAdd} className="bg-[#16a34a] text-white rounded-xl px-4 py-2.5 text-sm font-semibold flex items-center gap-2 whitespace-nowrap">
           <Plus size={16} /> MƏHSUL ƏLAVƏ ET
@@ -1539,7 +1703,7 @@ function MehsullarPage() {
                   <option value="çəki">Çəki ilə (tərəzi)</option>
                 </select>
               </div>
-              {form.novu === "çəki" && (
+              {form.novu === "çəki" ? (
                 <div className="pt-3">
                   <FormField
                     label="Tərəzi kodu (5 rəqəm)"
@@ -1547,6 +1711,22 @@ function MehsullarPage() {
                     onChange={(e) => setForm({ ...form, tereziKodu: e.target.value })}
                     placeholder="00010"
                   />
+                </div>
+              ) : (
+                <div className="pt-3">
+                  <div className="text-xs text-gray-500 mb-1">Ölçü vahidi</div>
+                  <select
+                    value={form.vahid}
+                    onChange={(e) => setForm({ ...form, vahid: e.target.value })}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-green-400"
+                  >
+                    <option value="ədəd">Ədəd</option>
+                    <option value="qutu">Qutu</option>
+                    <option value="paket">Paket</option>
+                    <option value="dəst">Dəst</option>
+                    <option value="litr">Litr</option>
+                    <option value="karton">Karton</option>
+                  </select>
                 </div>
               )}
             </div>
@@ -1643,17 +1823,85 @@ function StokPage() {
   );
 }
 
+// Parses the app's "DD.MM.YYYY HH:MM" sale timestamp into a Date for filtering/sorting.
+function parseTarix(t) {
+  if (!t) return null;
+  const [datePart, timePart] = t.split(" ");
+  const [d, m, y] = (datePart || "").split(".").map(Number);
+  if (!d || !m || !y) return null;
+  const [hh, mm] = (timePart || "0:0").split(":").map(Number);
+  return new Date(y, m - 1, d, hh || 0, mm || 0);
+}
+
 function SatislarPage() {
   const { sales } = useMarket();
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [kassirFilter, setKassirFilter] = useState("Hamısı");
+  const [odenishFilter, setOdenishFilter] = useState("Hamısı");
+
+  const kassirs = useMemo(() => ["Hamısı", ...new Set(sales.map((s) => s.kassir).filter(Boolean))], [sales]);
+
+  const filtered = useMemo(() => {
+    return sales.filter((s) => {
+      const d = parseTarix(s.tarix);
+      if (dateFrom && d && d < new Date(`${dateFrom}T00:00:00`)) return false;
+      if (dateTo && d && d > new Date(`${dateTo}T23:59:59`)) return false;
+      if (kassirFilter !== "Hamısı" && s.kassir !== kassirFilter) return false;
+      if (odenishFilter !== "Hamısı" && s.odenish !== odenishFilter) return false;
+      return true;
+    });
+  }, [sales, dateFrom, dateTo, kassirFilter, odenishFilter]);
+
+  const totalSum = filtered.reduce((sum, s) => sum + (s.meblegh || 0), 0);
+  const hasFilter = dateFrom || dateTo || kassirFilter !== "Hamısı" || odenishFilter !== "Hamısı";
+  const resetFilters = () => {
+    setDateFrom("");
+    setDateTo("");
+    setKassirFilter("Hamısı");
+    setOdenishFilter("Hamısı");
+  };
+
+  const selectCls = "bg-white border border-gray-200 rounded-full px-3 py-1.5 text-xs font-semibold text-gray-600 outline-none focus:border-green-400";
+
   return (
     <div>
       <PageHeader title="Satışlar" />
-      <div className="flex items-center gap-2 mb-4">
-        {["BUGÜN", "KASSİR 01", "ÖDƏNİŞ: HAMISI"].map((f) => (
-          <span key={f} className="bg-white border border-gray-200 rounded-full px-3 py-1.5 text-xs font-semibold text-gray-500">
-            {f}
-          </span>
-        ))}
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <div className="flex items-center gap-1.5 bg-white border border-gray-200 rounded-full pl-3 pr-2 py-1.5">
+          <span className="text-xs font-semibold text-gray-400">Tarix</span>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="text-xs font-semibold text-gray-600 outline-none w-[120px]"
+          />
+          <span className="text-xs text-gray-300">—</span>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="text-xs font-semibold text-gray-600 outline-none w-[120px]"
+          />
+        </div>
+        <select value={kassirFilter} onChange={(e) => setKassirFilter(e.target.value)} className={selectCls}>
+          {kassirs.map((k) => (
+            <option key={k} value={k}>{k === "Hamısı" ? "KASSİR: HAMISI" : k}</option>
+          ))}
+        </select>
+        <select value={odenishFilter} onChange={(e) => setOdenishFilter(e.target.value)} className={selectCls}>
+          <option value="Hamısı">ÖDƏNİŞ: HAMISI</option>
+          <option value="NƏĞD">NƏĞD</option>
+          <option value="KART">KART</option>
+        </select>
+        {hasFilter && (
+          <button onClick={resetFilters} className="text-xs font-semibold text-red-500 hover:text-red-600 px-2">
+            Filtri sıfırla ✕
+          </button>
+        )}
+        <div className="ml-auto text-xs text-gray-500 font-semibold">
+          {filtered.length} çek · {fmt(totalSum)} AZN
+        </div>
       </div>
       <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
         <table className="w-full text-sm">
@@ -1664,7 +1912,7 @@ function SatislarPage() {
             </tr>
           </thead>
           <tbody>
-            {sales.map((s) => (
+            {filtered.map((s) => (
               <tr key={s.no} className="border-t border-gray-100">
                 <td className="py-3 px-4 font-medium">{s.no}</td>
                 <td className="py-3 px-4 text-gray-500">{s.tarix}</td>
@@ -1672,9 +1920,20 @@ function SatislarPage() {
                 <td className="py-3 px-4">{s.say}</td>
                 <td className="py-3 px-4 font-semibold">{fmt(s.meblegh)} AZN</td>
                 <td className="py-3 px-4">{s.odenish}</td>
-                <td className="py-3 px-4"><StatusPill status={s.status} /></td>
+                <td className="py-3 px-4">
+                  {s._pending ? (
+                    <span className="bg-amber-50 text-amber-600 text-xs font-bold px-2.5 py-1 rounded-full">⏳ Gözləyir</span>
+                  ) : (
+                    <StatusPill status={s.status} />
+                  )}
+                </td>
               </tr>
             ))}
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={7} className="py-8 text-center text-gray-400">Bu filtrə uyğun satış tapılmadı</td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -1712,7 +1971,7 @@ function HesabatlarPage() {
     setTimeout(() => setPdfMsg(null), 4500);
   };
 
-  const bugunSales = sales.filter((s) => s.tarix && s.tarix.startsWith(TODAY_STR));
+  const bugunSales = sales.filter((s) => s.tarix && s.tarix.startsWith(nowDateStr()));
   const dovriyye = bugunSales.reduce((sum, s) => sum + (s.meblegh || 0), 0);
   const neghd = bugunSales.filter((s) => s.odenish === "NƏĞD").reduce((sum, s) => sum + (s.meblegh || 0), 0);
   const kart = bugunSales.filter((s) => s.odenish === "KART").reduce((sum, s) => sum + (s.meblegh || 0), 0);
@@ -1757,7 +2016,7 @@ function HesabatlarPage() {
         <div className="bg-white rounded-2xl border border-gray-200 p-5">
           <div className="text-xs text-gray-500 font-medium">GÜNLÜK DÖVRİYYƏ</div>
           <div className="text-2xl font-black mt-1">{fmt(dovriyye)} AZN</div>
-          <div className="text-xs text-gray-400 mt-1">{TODAY_STR}</div>
+          <div className="text-xs text-gray-400 mt-1">{nowDateStr()}</div>
         </div>
         <div className="bg-white rounded-2xl border border-gray-200 p-5">
           <div className="flex justify-between text-sm">
@@ -1832,10 +2091,10 @@ function HesabatlarPage() {
       {/* Print-only report — invisible on screen, only rendered when window.print() runs */}
       <div id="zehra-print-area" className="hidden print:block p-8 font-sans text-black">
         <div className="text-center mb-6">
-          <div className="font-black text-2xl">{settings.magazaAdi || "ZƏHRƏ MARKET"}</div>
+          <div className="font-black text-2xl">{settings.magazaAdi || "ZƏHRA MARKET"}</div>
           <div className="text-sm text-gray-600 mt-1">{settings.unvan}</div>
           <div className="text-sm text-gray-600">VÖEN: {settings.voen} · Tel: {settings.telefon}</div>
-          <div className="text-lg font-bold mt-3">Günlük Hesabat — {TODAY_STR}</div>
+          <div className="text-lg font-bold mt-3">Günlük Hesabat — {nowDateStr()}</div>
         </div>
 
         <table className="w-full text-sm mb-6 border border-gray-300" style={{ borderCollapse: "collapse" }}>
@@ -1917,7 +2176,7 @@ function HesabatlarPage() {
           </tbody>
         </table>
 
-        <div className="text-center text-xs text-gray-500 mt-8">Hesabat yaradılma vaxtı: {TODAY_STR}</div>
+        <div className="text-center text-xs text-gray-500 mt-8">Hesabat yaradılma vaxtı: {nowDateStr()}</div>
       </div>
     </div>
   );
@@ -2022,29 +2281,48 @@ function IscilerPage() {
   );
 }
 
-const emptySupplierForm = { ad: "", tel: "", meblegh: "" };
+const emptySupplierForm = { ad: "", tel: "", meblegh: "", borc: "0", status: "Aktiv" };
 
 function TechizatcilarPage() {
-  const { suppliers, addSupplier } = useMarket();
+  const { suppliers, addSupplier, updateSupplier, deleteSupplier } = useMarket();
   const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(emptySupplierForm);
 
   const openAdd = () => {
+    setEditing(null);
     setForm(emptySupplierForm);
+    setModalOpen(true);
+  };
+
+  const openEdit = (s) => {
+    setEditing(s);
+    setForm({
+      ad: s.ad, tel: s.tel, meblegh: String(s.meblegh),
+      borc: String(s.borc), status: s.status,
+    });
     setModalOpen(true);
   };
 
   const save = () => {
     if (!form.ad.trim()) return;
-    addSupplier({
+    const payload = {
       ad: form.ad.trim(),
       tel: form.tel.trim(),
-      sonAlish: TODAY_STR,
       meblegh: parseFloat(form.meblegh) || 0,
-      borc: 0,
-      status: "Aktiv",
-    });
+      borc: parseFloat(form.borc) || 0,
+      status: form.status,
+    };
+    if (editing) {
+      updateSupplier(editing.ad, payload);
+    } else {
+      addSupplier({ ...payload, sonAlish: nowDateStr() });
+    }
     setModalOpen(false);
+  };
+
+  const remove = (s) => {
+    if (window.confirm(`"${s.ad}" təchizatçısı silinsin?`)) deleteSupplier(s.ad);
   };
 
   return (
@@ -2060,7 +2338,7 @@ function TechizatcilarPage() {
           <thead>
             <tr className="bg-gray-50 text-left text-gray-500 text-xs">
               <th className="py-3 px-4">Təchizatçı</th><th className="py-3 px-4">Əlaqə</th><th className="py-3 px-4">Son alış</th>
-              <th className="py-3 px-4">Məbləğ</th><th className="py-3 px-4">Borc</th><th className="py-3 px-4">Status</th>
+              <th className="py-3 px-4">Məbləğ</th><th className="py-3 px-4">Borc</th><th className="py-3 px-4">Status</th><th className="py-3 px-4"></th>
             </tr>
           </thead>
           <tbody>
@@ -2072,18 +2350,45 @@ function TechizatcilarPage() {
                 <td className="py-3 px-4 font-semibold">{fmt(s.meblegh)} AZN</td>
                 <td className={`py-3 px-4 font-semibold ${s.borc > 0 ? "text-red-500" : "text-gray-400"}`}>{fmt(s.borc)} AZN</td>
                 <td className="py-3 px-4"><StatusPill status={s.status} /></td>
+                <td className="py-3 px-4">
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => openEdit(s)} className="text-blue-600 text-xs font-semibold">DÜZƏLT</button>
+                    <button onClick={() => remove(s)} className="text-red-400 hover:text-red-600">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </td>
               </tr>
             ))}
+            {suppliers.length === 0 && (
+              <tr>
+                <td colSpan={7} className="py-8 text-center text-gray-400">Təchizatçı yoxdur</td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
 
       {modalOpen && (
-        <Modal title="Yeni təchizatçı əlavə et" onClose={() => setModalOpen(false)}>
+        <Modal title={editing ? "Təchizatçını düzəlt" : "Yeni təchizatçı əlavə et"} onClose={() => setModalOpen(false)}>
           <div className="space-y-3">
             <FormField label="Təchizatçı adı" value={form.ad} onChange={(e) => setForm({ ...form, ad: e.target.value })} />
             <FormField label="Əlaqə nömrəsi" value={form.tel} onChange={(e) => setForm({ ...form, tel: e.target.value })} />
-            <FormField label="Son alış məbləği (AZN)" type="number" value={form.meblegh} onChange={(e) => setForm({ ...form, meblegh: e.target.value })} />
+            <div className="grid grid-cols-2 gap-3">
+              <FormField label="Son alış məbləği (AZN)" type="number" value={form.meblegh} onChange={(e) => setForm({ ...form, meblegh: e.target.value })} />
+              <FormField label="Borc (AZN)" type="number" value={form.borc} onChange={(e) => setForm({ ...form, borc: e.target.value })} />
+            </div>
+            <div>
+              <div className="text-xs text-gray-500 mb-1">Status</div>
+              <select
+                value={form.status}
+                onChange={(e) => setForm({ ...form, status: e.target.value })}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-green-400"
+              >
+                <option value="Aktiv">Aktiv</option>
+                <option value="Borc var">Borc var</option>
+              </select>
+            </div>
             <div className="flex gap-2 pt-2">
               <button onClick={() => setModalOpen(false)} className="flex-1 py-2.5 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
                 Ləğv et
@@ -2099,11 +2404,135 @@ function TechizatcilarPage() {
   );
 }
 
+function TereziPage() {
+  const { products, settings, setSettings } = useMarket();
+  const [ip, setIp] = useState(settings.tereziIp || "");
+  const [port, setPort] = useState(settings.tereziPort || "1111");
+  const [msg, setMsg] = useState(null);
+  const [testing, setTesting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const isElectron = typeof window !== "undefined" && !!window.electronAPI;
+  const weighedCount = products.filter((p) => p.novu === "çəki").length;
+
+  const saveConn = (nextIp, nextPort) => setSettings({ ...settings, tereziIp: nextIp, tereziPort: nextPort });
+
+  const testConnection = async () => {
+    if (!isElectron || !ip.trim()) return;
+    setTesting(true);
+    const res = await window.electronAPI.testTereziConnection(ip.trim(), parseInt(port, 10) || 1111);
+    setTesting(false);
+    setMsg(res.ok ? { text: "✓ Tərəzi ilə bağlantı quruldu.", isError: false } : { text: `Bağlantı alınmadı: ${res.error}`, isError: true });
+    setTimeout(() => setMsg(null), 6000);
+  };
+
+  const sendPlu = async () => {
+    if (!isElectron || !ip.trim()) return;
+    setBusy(true);
+    const res = await window.electronAPI.sendTereziPlu(ip.trim(), parseInt(port, 10) || 1111, products);
+    setBusy(false);
+    setMsg(
+      res.ok
+        ? { text: `${res.count} məhsul tərəziyə göndərildi.`, isError: false }
+        : { text: `Göndərilmədi: ${res.error}`, isError: true }
+    );
+    setTimeout(() => setMsg(null), 6000);
+  };
+
+  return (
+    <div>
+      <PageHeader title="Tərəzi" />
+
+      <div className="bg-green-50 border border-green-200 rounded-2xl p-5 mb-4 text-sm text-green-800">
+        <div className="font-bold mb-1">Format təsdiqləndi</div>
+        PLU faylının formatı sizin tərəzinin real mübadilə faylı ilə byte-byte müqayisə edilərək dəqiqləşdirilib.
+        1C-yə ehtiyac yoxdur — proqram tərəziyə birbaşa (TCP, IP:port ilə) qoşulur. Yalnız <b>"çəki ilə"</b> satılan
+        məhsullar göndərilir (paketlənmiş/ədədlə satılanlar tərəziyə aid deyil). Əvvəlcə "Bağlantını yoxla" ilə test edin.
+      </div>
+
+      {!isElectron && (
+        <div className="bg-red-50 border border-red-200 rounded-2xl p-5 mb-4 text-sm text-red-600 font-semibold">
+          Bu funksiya yalnız quraşdırılmış (Electron) tətbiqdə işləyir, brauzer önizləməsində şəbəkə soketinə giriş yoxdur.
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl border border-gray-200 p-5 mb-4">
+        <div className="text-sm font-bold text-gray-600 mb-1">TƏRƏZİNİN ŞƏBƏKƏ ÜNVANI</div>
+        <div className="text-xs text-gray-400 mb-4">
+          Tərəzinin öz ekranında gördüyünüz IP və port (1C-dəki "Tərəzi" ayarındakı ilə eyni, məs. 192.168.1.151 / 1111).
+        </div>
+        <div className="grid grid-cols-[1fr_140px_auto] gap-3">
+          <FormField
+            label="IP ünvanı"
+            placeholder="192.168.1.151"
+            value={ip}
+            onChange={(e) => { setIp(e.target.value); saveConn(e.target.value, port); }}
+          />
+          <FormField
+            label="Port"
+            placeholder="1111"
+            value={port}
+            onChange={(e) => { setPort(e.target.value); saveConn(ip, e.target.value); }}
+          />
+          <div className="flex items-end">
+            <button
+              onClick={testConnection}
+              disabled={!isElectron || !ip.trim() || testing}
+              className="border border-gray-200 hover:border-gray-300 disabled:opacity-40 rounded-xl px-4 py-2.5 text-sm font-semibold whitespace-nowrap h-[42px]"
+            >
+              {testing ? "Yoxlanılır..." : "Bağlantını yoxla"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {msg && (
+        <div className={`rounded-xl px-4 py-3 text-sm font-semibold mb-4 ${msg.isError ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}>
+          {msg.text}
+        </div>
+      )}
+
+      <button
+        onClick={sendPlu}
+        disabled={!isElectron || !ip.trim() || busy || weighedCount === 0}
+        className="bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl px-5 py-3 text-sm font-bold"
+      >
+        {busy ? "Göndərilir..." : `MƏHSULLARI TƏRƏZİYƏ GÖNDƏR (${weighedCount})`}
+      </button>
+      {weighedCount === 0 && (
+        <div className="text-xs text-gray-400 mt-2">
+          Heç bir "çəki ilə" satılan məhsul yoxdur — Məhsullar səhifəsində məhsulun "Növü" sahəsini "çəki" edin.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BackupPage() {
-  const { products, sales, employees, suppliers, settings, restoreBackup } = useMarket();
+  const { products, sales, employees, suppliers, settings, setSettings, restoreBackup } = useMarket();
   const [restoring, setRestoring] = useState(false);
   const [msg, setMsg] = useState(null);
+  const [autoBusy, setAutoBusy] = useState(false);
   const fileInputRef = React.useRef(null);
+  const isElectron = typeof window !== "undefined" && !!window.electronAPI;
+
+  const pickAutoFolder = async () => {
+    if (!isElectron) return;
+    const res = await window.electronAPI.pickBackupFolder();
+    if (res.ok) {
+      setSettings({ ...settings, avtoBackupQovlugu: res.folder });
+      setMsg({ text: `Qovluq seçildi: ${res.folder}. Hər gün avtomatik oraya yazılacaq.`, isError: false });
+      setTimeout(() => setMsg(null), 5000);
+    }
+  };
+
+  const runAutoNow = async () => {
+    if (!isElectron || !settings.avtoBackupQovlugu) return;
+    setAutoBusy(true);
+    await window.electronAPI.runBackupNow();
+    setAutoBusy(false);
+    setMsg({ text: "İndiki nüsxə seçilmiş qovluğa yazıldı.", isError: false });
+    setTimeout(() => setMsg(null), 4000);
+  };
 
   const download = () => {
     const payload = { products, sales, employees, suppliers, settings, yaradilmaTarixi: new Date().toISOString() };
@@ -2186,6 +2615,39 @@ function BackupPage() {
           </button>
         </div>
       </div>
+      <div className="bg-white rounded-2xl border border-gray-200 p-6 mt-4">
+        <div className="w-11 h-11 rounded-xl bg-blue-50 flex items-center justify-center mb-4">
+          <History size={20} className="text-blue-600" />
+        </div>
+        <div className="font-bold mb-1">Avtomatik ehtiyat nüsxə (gündəlik)</div>
+        <div className="text-sm text-gray-500 mb-4">
+          Bir qovluq seçin (mütləq <b>başqa disk və ya USB</b> — eyni diskdə saxlamağın mənası yoxdur, disk xarab olsa hər ikisi itər).
+          Proqram hər gün avtomatik oraya bir nüsxə yazacaq.
+        </div>
+        {!isElectron && (
+          <div className="text-sm text-red-600 font-semibold mb-3">Yalnız quraşdırılmış (Electron) tətbiqdə işləyir.</div>
+        )}
+        <div className="flex items-center gap-3 mb-3">
+          <div className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm font-mono text-gray-600 bg-gray-50 truncate">
+            {settings.avtoBackupQovlugu || "Qovluq seçilməyib"}
+          </div>
+          <button
+            onClick={pickAutoFolder}
+            disabled={!isElectron}
+            className="border border-gray-200 hover:border-gray-300 disabled:opacity-40 rounded-xl px-4 py-2.5 text-sm font-semibold whitespace-nowrap"
+          >
+            Qovluq seç
+          </button>
+        </div>
+        <button
+          onClick={runAutoNow}
+          disabled={!isElectron || !settings.avtoBackupQovlugu || autoBusy}
+          className="bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl px-4 py-2.5 text-sm font-semibold"
+        >
+          {autoBusy ? "Yazılır..." : "İndi bir nüsxə yaz"}
+        </button>
+      </div>
+
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-800 mt-4">
         Tövsiyə: mağazanı bağlayarkən gün sonunda bir ehtiyat nüsxə yükləyib, ayrıca bir yerdə (USB, Google Drive və s.) saxlayın.
       </div>
@@ -2320,6 +2782,7 @@ const PAGES = {
   hesabatlar: HesabatlarPage,
   isciler: IscilerPage,
   techizatcilar: TechizatcilarPage,
+  terezi: TereziPage,
   backup: BackupPage,
   parametrler: ParametrlerPage,
 };
@@ -2382,11 +2845,24 @@ function AdminView({ onResetRole }) {
 /* ROOT APP with a small dev switcher between Kassa / Admin           */
 /* ---------------------------------------------------------------- */
 
-function ConnectionBanner({ connected }) {
-  if (connected) return null;
+// Deliberately NOT `fixed` — a fixed banner would float on top of the
+// document flow and silently block clicks on whatever happens to sit at the
+// same coordinates (e.g. the Kassa/Admin toggle). `sticky` reserves its own
+// space (pushing everything else down) while still staying visible on scroll.
+function ConnectionBanner({ connected, pendingCount }) {
+  if (connected && !pendingCount) return null;
+  if (!connected) {
+    return (
+      <div className="bg-red-600 text-white text-sm font-semibold text-center py-2 px-4 sticky top-0 z-[100]">
+        ⚠ Serverlə əlaqə yoxdur — Admin kompüteri açıq və eyni şəbəkədə olduğundan əmin olun.
+        {pendingCount > 0 && ` Satışlar lokal saxlanılır (${pendingCount}) — əlaqə bərpa olunanda avtomatik göndəriləcək.`}
+      </div>
+    );
+  }
+  // Connected again but still flushing the queued sales from while we were offline.
   return (
-    <div className="bg-red-600 text-white text-sm font-semibold text-center py-2 px-4 fixed top-0 left-0 right-0 z-[100]">
-      ⚠ Serverlə əlaqə yoxdur — Admin kompüteri açıq və eyni şəbəkədə olduğundan əmin olun. Yeni dəyişikliklər yadda saxlanmaya bilər.
+    <div className="bg-amber-500 text-white text-sm font-semibold text-center py-2 px-4 sticky top-0 z-[100]">
+      ⏳ {pendingCount} gözləyən satış serverə göndərilir...
     </div>
   );
 }
@@ -2401,7 +2877,7 @@ function MainApp({ role, serverUrl, token, onResetRole }) {
 }
 
 function Inner({ role, app, setApp, onResetRole }) {
-  const { connected, settings } = useMarket();
+  const { connected, settings, pendingCount } = useMarket();
   const [pwOpen, setPwOpen] = useState(false);
   const [pwInput, setPwInput] = useState("");
   const [pwError, setPwError] = useState(false);
@@ -2429,7 +2905,7 @@ function Inner({ role, app, setApp, onResetRole }) {
 
   return (
     <div>
-      <ConnectionBanner connected={connected} />
+      <ConnectionBanner connected={connected} pendingCount={pendingCount} />
       {role === "admin" && (
         <div className="fixed top-3 right-3 z-[60] bg-white shadow-lg rounded-full p-1 flex gap-1 border border-gray-200">
           <button

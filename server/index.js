@@ -34,23 +34,59 @@ function getDataFile(userDataDir) {
   return path.join(userDataDir, "zehra-market-data.json");
 }
 
+// Writes atomically: a half-written file (e.g. from a power cut mid-save)
+// can never be left as the real data file, because we only rename the temp
+// file over it once the write has fully landed on disk.
+function writeFileAtomic(filePath, content) {
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmpPath, content);
+  fs.renameSync(tmpPath, filePath);
+}
+
+// If the main data file is ever unreadable (corrupted by a crash, an
+// interrupted write on an older version, manual editing, etc.), restore the
+// most recent rolling backup instead of taking the whole store down.
+function recoverFromLatestBackup(dataFile) {
+  const dir = path.join(path.dirname(dataFile), "backups");
+  if (!fs.existsSync(dir)) return null;
+  const files = fs.readdirSync(dir).filter((f) => f.startsWith("backup-")).sort();
+  for (let i = files.length - 1; i >= 0; i--) {
+    try {
+      const raw = fs.readFileSync(path.join(dir, files[i]), "utf-8");
+      const data = JSON.parse(raw);
+      writeFileAtomic(dataFile, raw);
+      console.error(`Data file was corrupted — recovered from ${files[i]}.`);
+      return data;
+    } catch {
+      continue; // that backup is also bad, try the next-oldest one
+    }
+  }
+  return null;
+}
+
 function loadData(dataFile) {
   if (!fs.existsSync(dataFile)) {
     fs.mkdirSync(path.dirname(dataFile), { recursive: true });
     const seed = JSON.parse(fs.readFileSync(path.join(__dirname, "seed.json"), "utf-8"));
-    fs.writeFileSync(dataFile, JSON.stringify(seed, null, 2));
+    writeFileAtomic(dataFile, JSON.stringify(seed, null, 2));
   }
-  const data = JSON.parse(fs.readFileSync(dataFile, "utf-8"));
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(dataFile, "utf-8"));
+  } catch (err) {
+    data = recoverFromLatestBackup(dataFile);
+    if (!data) throw err; // no usable backup either — nothing more we can do
+  }
   if (!data.settings) data.settings = {};
   if (!data.settings.apiToken) {
     data.settings.apiToken = generateToken();
-    fs.writeFileSync(dataFile, JSON.stringify(data, null, 2));
+    writeFileAtomic(dataFile, JSON.stringify(data, null, 2));
   }
   return data;
 }
 
 function saveData(dataFile, data) {
-  fs.writeFileSync(dataFile, JSON.stringify(data, null, 2));
+  writeFileAtomic(dataFile, JSON.stringify(data, null, 2));
   writeBackup(dataFile, data);
 }
 
@@ -132,6 +168,22 @@ function startServer(userDataDir, port = 4000) {
   app.post("/api/suppliers", (req, res) => {
     const data = loadData(dataFile);
     data.suppliers.unshift(req.body);
+    saveData(dataFile, data);
+    res.json(data);
+  });
+
+  app.put("/api/suppliers/:ad", (req, res) => {
+    const data = loadData(dataFile);
+    const target = decodeURIComponent(req.params.ad);
+    data.suppliers = data.suppliers.map((s) => (s.ad === target ? { ...s, ...req.body } : s));
+    saveData(dataFile, data);
+    res.json(data);
+  });
+
+  app.delete("/api/suppliers/:ad", (req, res) => {
+    const data = loadData(dataFile);
+    const target = decodeURIComponent(req.params.ad);
+    data.suppliers = data.suppliers.filter((s) => s.ad !== target);
     saveData(dataFile, data);
     res.json(data);
   });
