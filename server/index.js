@@ -7,6 +7,16 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
+
+function generateToken() {
+  return crypto.randomBytes(4).toString("hex").toUpperCase();
+}
+
+function isLocalRequest(req) {
+  const ip = req.ip || (req.connection && req.connection.remoteAddress) || "";
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
 
 function getLocalIp() {
   const nets = os.networkInterfaces();
@@ -26,14 +36,38 @@ function getDataFile(userDataDir) {
 
 function loadData(dataFile) {
   if (!fs.existsSync(dataFile)) {
+    fs.mkdirSync(path.dirname(dataFile), { recursive: true });
     const seed = JSON.parse(fs.readFileSync(path.join(__dirname, "seed.json"), "utf-8"));
     fs.writeFileSync(dataFile, JSON.stringify(seed, null, 2));
   }
-  return JSON.parse(fs.readFileSync(dataFile, "utf-8"));
+  const data = JSON.parse(fs.readFileSync(dataFile, "utf-8"));
+  if (!data.settings) data.settings = {};
+  if (!data.settings.apiToken) {
+    data.settings.apiToken = generateToken();
+    fs.writeFileSync(dataFile, JSON.stringify(data, null, 2));
+  }
+  return data;
 }
 
 function saveData(dataFile, data) {
   fs.writeFileSync(dataFile, JSON.stringify(data, null, 2));
+  writeBackup(dataFile, data);
+}
+
+// Keeps a rolling set of timestamped snapshots next to the main data file,
+// so a bad edit or a corrupted save can be recovered from.
+function writeBackup(dataFile, data) {
+  try {
+    const dir = path.join(path.dirname(dataFile), "backups");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    fs.writeFileSync(path.join(dir, `backup-${stamp}.json`), JSON.stringify(data, null, 2));
+    const files = fs.readdirSync(dir).filter((f) => f.startsWith("backup-")).sort();
+    const excess = files.length - 200;
+    for (let i = 0; i < excess; i++) fs.unlinkSync(path.join(dir, files[i]));
+  } catch (err) {
+    console.error("Backup could not be written:", err);
+  }
 }
 
 function startServer(userDataDir, port = 4000) {
@@ -50,10 +84,22 @@ function startServer(userDataDir, port = 4000) {
     next();
   });
 
+  // The Admin PC talks to its own server over localhost and is always trusted.
+  // Any other computer on the network (a Kassa PC) must present the shared
+  // token so a stranger on the same Wi-Fi can't read or edit the store data.
+  app.use((req, res, next) => {
+    if (req.path === "/api/ping" || isLocalRequest(req)) return next();
+    const data = loadData(dataFile);
+    const token = req.header("x-api-token");
+    if (token && token === data.settings.apiToken) return next();
+    res.status(401).json({ error: "Yanlış və ya boş token." });
+  });
+
   app.get("/api/ping", (req, res) => res.json({ ok: true, name: "Zəhrə Market Server" }));
 
   app.get("/api/network-info", (req, res) => {
-    res.json({ ip: getLocalIp(), port });
+    const data = loadData(dataFile);
+    res.json({ ip: getLocalIp(), port, token: isLocalRequest(req) ? data.settings.apiToken : undefined });
   });
 
   app.get("/api/state", (req, res) => {

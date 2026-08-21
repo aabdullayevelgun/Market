@@ -172,14 +172,16 @@ const useMarket = () => useContext(MarketContext);
 
 const emptyState = { products: [], sales: [], employees: [], suppliers: [], settings: INITIAL_SETTINGS };
 
-function MarketProvider({ children, serverUrl }) {
+function MarketProvider({ children, serverUrl, token = "" }) {
   const [state, setState] = useState(emptyState);
   const [connected, setConnected] = useState(true);
   const [loading, setLoading] = useState(true);
 
+  const authHeaders = () => (token ? { "x-api-token": token } : {});
+
   const refresh = async () => {
     try {
-      const res = await fetch(`${serverUrl}/api/state`);
+      const res = await fetch(`${serverUrl}/api/state`, { headers: authHeaders() });
       if (!res.ok) throw new Error("bad response");
       const data = await res.json();
       setState(data);
@@ -195,13 +197,13 @@ function MarketProvider({ children, serverUrl }) {
     refresh();
     const id = setInterval(refresh, 4000);
     return () => clearInterval(id);
-  }, [serverUrl]);
+  }, [serverUrl, token]);
 
   const call = async (method, path, body) => {
     try {
       const res = await fetch(`${serverUrl}${path}`, {
         method,
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: body != null ? JSON.stringify(body) : undefined,
       });
       if (!res.ok) throw new Error("bad response");
@@ -249,26 +251,32 @@ function useDeviceRole() {
   const [serverUrl, setServerUrlState] = useState(
     () => localStorage.getItem("zehra_server_url") || "http://localhost:4000"
   );
-  const setRole = (r, url) => {
+  const [token, setTokenState] = useState(() => localStorage.getItem("zehra_token") || "");
+  const setRole = (r, url, tok) => {
     localStorage.setItem("zehra_role", r);
     localStorage.setItem("zehra_server_url", url);
+    localStorage.setItem("zehra_token", tok || "");
     setRoleState(r);
     setServerUrlState(url);
+    setTokenState(tok || "");
   };
   const reset = () => {
     localStorage.removeItem("zehra_role");
     localStorage.removeItem("zehra_server_url");
+    localStorage.removeItem("zehra_token");
     setRoleState("");
   };
-  return { role, serverUrl, setRole, reset };
+  return { role, serverUrl, token, setRole, reset };
 }
 
 function RoleSetup({ onDone }) {
   const [step, setStep] = useState("choose"); // choose | admin-ip | kassa-ip
   const [ip, setIp] = useState("");
+  const [tokenInput, setTokenInput] = useState("");
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState("");
   const [adminIp, setAdminIp] = useState(null);
+  const [adminToken, setAdminToken] = useState(null);
 
   const chooseAdmin = async () => {
     setStep("admin-ip");
@@ -276,8 +284,10 @@ function RoleSetup({ onDone }) {
       const res = await fetch("http://localhost:4000/api/network-info");
       const data = await res.json();
       setAdminIp(data.ip || null);
+      setAdminToken(data.token || null);
     } catch {
       setAdminIp(null);
+      setAdminToken(null);
     }
   };
 
@@ -288,9 +298,11 @@ function RoleSetup({ onDone }) {
     try {
       const res = await fetch(`${url}/api/ping`);
       if (!res.ok) throw new Error();
-      onDone("kassa", url);
+      const stateRes = await fetch(`${url}/api/state`, { headers: { "x-api-token": tokenInput.trim() } });
+      if (!stateRes.ok) throw new Error("token");
+      onDone("kassa", url, tokenInput.trim());
     } catch {
-      setTestError("Bu ünvana qoşulmaq mümkün olmadı. Admin kompüterinin açıq olduğunu və IP ünvanının düzgün yazıldığını yoxlayın.");
+      setTestError("Qoşulmaq mümkün olmadı. IP ünvanını, tokeni və Admin kompüterinin açıq olduğunu yoxlayın.");
     } finally {
       setTesting(false);
     }
@@ -347,8 +359,14 @@ function RoleSetup({ onDone }) {
                 </div>
               )}
             </div>
+            {adminToken && (
+              <div className="bg-blue-50 border-2 border-blue-200 rounded-2xl p-4 text-center mb-5">
+                <div className="text-xs text-gray-500 mb-1">Kassa kompüterlərinə bu tokeni də verin</div>
+                <div className="font-black text-xl text-blue-700 font-mono tracking-widest">{adminToken}</div>
+              </div>
+            )}
             <button
-              onClick={() => onDone("admin", "http://localhost:4000")}
+              onClick={() => onDone("admin", "http://localhost:4000", adminToken)}
               className="w-full bg-[#16a34a] hover:bg-[#15803d] text-white rounded-xl py-3 font-bold text-sm"
             >
               Davam et
@@ -363,7 +381,15 @@ function RoleSetup({ onDone }) {
                 Admin kompüterini açanda ona bu ünvan göstərilir (rol seçimindən sonra).
               </div>
             </div>
-            <FormField label="IP ünvanı" placeholder="məs. 192.168.1.15" value={ip} onChange={(e) => setIp(e.target.value)} />
+            <div className="space-y-3">
+              <FormField label="IP ünvanı" placeholder="məs. 192.168.1.15" value={ip} onChange={(e) => setIp(e.target.value)} />
+              <FormField
+                label="Token"
+                placeholder="Admin ekranında göstərilən kod"
+                value={tokenInput}
+                onChange={(e) => setTokenInput(e.target.value.toUpperCase())}
+              />
+            </div>
             {testError && <div className="text-red-500 text-xs font-semibold mt-2">{testError}</div>}
             <div className="flex gap-2 mt-4">
               <button onClick={() => setStep("choose")} className="flex-1 py-2.5 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
@@ -371,7 +397,7 @@ function RoleSetup({ onDone }) {
               </button>
               <button
                 onClick={connectKassa}
-                disabled={!ip.trim() || testing}
+                disabled={!ip.trim() || !tokenInput.trim() || testing}
                 className="flex-[2] bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl py-2.5 font-bold text-sm"
               >
                 {testing ? "Yoxlanılır..." : "Qoşul"}
@@ -388,24 +414,24 @@ function RoleSetup({ onDone }) {
 /* Small shared UI helpers                                           */
 /* ---------------------------------------------------------------- */
 
-function Logo({ size = "md" }) {
-  const box = size === "sm" ? 46 : 56;
+function Logo({ size = "md", showText = true }) {
+  const box = size === "sm" ? 46 : size === "xs" ? 22 : 56;
   const text = size === "sm" ? "text-xl" : "text-2xl";
   return (
     <div className="flex items-center gap-3">
       <svg width={box} height={box} viewBox="0 0 64 64" className="shrink-0">
         <defs>
           <linearGradient id="zmBadge" x1="0" y1="0" x2="0.3" y2="1">
-            <stop offset="0%" stopColor="#4ade80" />
-            <stop offset="55%" stopColor="#16a34a" />
-            <stop offset="100%" stopColor="#0f5132" />
+            <stop offset="0%" stopColor="#60a5fa" />
+            <stop offset="55%" stopColor="#2563eb" />
+            <stop offset="100%" stopColor="#1e3a8a" />
           </linearGradient>
           <linearGradient id="zmBasket" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="#ffffff" />
-            <stop offset="100%" stopColor="#eafcef" />
+            <stop offset="100%" stopColor="#eaf2fc" />
           </linearGradient>
           <filter id="zmShadow" x="-50%" y="-50%" width="200%" height="200%">
-            <feDropShadow dx="0" dy="2.5" stdDeviation="2.5" floodColor="#0f3d22" floodOpacity="0.45" />
+            <feDropShadow dx="0" dy="2.5" stdDeviation="2.5" floodColor="#0f2a4d" floodOpacity="0.45" />
           </filter>
         </defs>
 
@@ -415,29 +441,32 @@ function Logo({ size = "md" }) {
         <g transform="translate(32,35)">
           <path d="M-10 -15 Q0 -25 10 -15" stroke="#ffffff" strokeWidth="3" fill="none" strokeLinecap="round" />
           <path d="M-15 -13 L15 -13 L11 10 L-11 10 Z" fill="url(#zmBasket)" />
-          <path d="M-15 -13 L15 -13 L13.3 -6.5 L-13.3 -6.5 Z" fill="#16a34a" opacity="0.9" />
-          <line x1="-8.5" y1="-11" x2="-6.5" y2="8" stroke="#22c55e" strokeWidth="1.6" strokeLinecap="round" />
-          <line x1="0" y1="-11" x2="0" y2="8" stroke="#22c55e" strokeWidth="1.6" strokeLinecap="round" />
-          <line x1="8.5" y1="-11" x2="6.5" y2="8" stroke="#22c55e" strokeWidth="1.6" strokeLinecap="round" />
-          <circle cx="-6" cy="15" r="2.6" fill="#14532d" />
-          <circle cx="6" cy="15" r="2.6" fill="#14532d" />
+          <path d="M-15 -13 L15 -13 L13.3 -6.5 L-13.3 -6.5 Z" fill="#2563eb" opacity="0.9" />
+          <line x1="-8.5" y1="-11" x2="-6.5" y2="8" stroke="#3b82f6" strokeWidth="1.6" strokeLinecap="round" />
+          <line x1="0" y1="-11" x2="0" y2="8" stroke="#3b82f6" strokeWidth="1.6" strokeLinecap="round" />
+          <line x1="8.5" y1="-11" x2="6.5" y2="8" stroke="#3b82f6" strokeWidth="1.6" strokeLinecap="round" />
+          <circle cx="-6" cy="15" r="2.6" fill="#1e3a8a" />
+          <circle cx="6" cy="15" r="2.6" fill="#1e3a8a" />
           <circle cx="-6" cy="15" r="1" fill="#ffffff" />
           <circle cx="6" cy="15" r="1" fill="#ffffff" />
         </g>
 
-        <circle cx="49" cy="15" r="6" fill="#f97316" stroke="#ffffff" strokeWidth="2.2" />
+        <circle cx="49" cy="15" r="6" fill="#eab308" stroke="#ffffff" strokeWidth="2.2" />
       </svg>
-      <div className={`font-black leading-none ${text} whitespace-nowrap`}>
-        <span className="text-[#16a34a]" style={{ filter: "drop-shadow(0 2px 1.5px rgba(0,0,0,0.3))" }}>
-          Zəhrə
-        </span>{" "}
-        <span className="text-[#f97316]" style={{ filter: "drop-shadow(0 2px 1.5px rgba(0,0,0,0.3))" }}>
-          Market
-        </span>
-      </div>
+      {showText && (
+        <div className={`font-black leading-none ${text} whitespace-nowrap`}>
+          <span className="text-[#2563eb]" style={{ filter: "drop-shadow(0 2px 1.5px rgba(0,0,0,0.3))" }}>
+            ZƏHRA
+          </span>{" "}
+          <span className="text-[#eab308]" style={{ filter: "drop-shadow(0 2px 1.5px rgba(0,0,0,0.3))" }}>
+            MARKET
+          </span>
+        </div>
+      )}
     </div>
   );
 }
+
 
 function Modal({ title, onClose, children, widthClass = "max-w-md" }) {
   React.useEffect(() => {
@@ -2195,7 +2224,7 @@ function ParametrlerPage({ onResetRole }) {
           Bu kompüter hazırda <b>{role === "admin" ? "ADMİN (Baza)" : "KASSA (yalnız satış)"}</b> rolundadır və
           <span className="font-mono"> {serverUrl}</span> ünvanındakı serverlə işləyir.
           {role === "admin" && (
-            <> Kassa kompüterlərini qoşmaq üçün bu kompüterin lokal IP ünvanını (Windows-da <code>ipconfig</code> əmri ilə tapılır, "IPv4 Address" sətri) həmin kompüterlərdə daxil edin.</>
+            <> Kassa kompüterlərini qoşmaq üçün bu kompüterin lokal IP ünvanını (Windows-da <code>ipconfig</code> əmri ilə tapılır, "IPv4 Address" sətri) və soldakı menyunun altında görünən tokeni həmin kompüterlərdə daxil edin. Token olmadan kassa serverə qoşula bilməz.</>
           )}
         </div>
         <button
@@ -2298,13 +2327,20 @@ const PAGES = {
 function AdminView({ onResetRole }) {
   const [active, setActive] = useState("icmal");
   const [ip, setIp] = useState(null);
+  const [netToken, setNetToken] = useState(null);
   const Page = PAGES[active];
 
   React.useEffect(() => {
     fetch("http://localhost:4000/api/network-info")
       .then((r) => r.json())
-      .then((d) => setIp(d.ip || null))
-      .catch(() => setIp(null));
+      .then((d) => {
+        setIp(d.ip || null);
+        setNetToken(d.token || null);
+      })
+      .catch(() => {
+        setIp(null);
+        setNetToken(null);
+      });
   }, []);
 
   return (
@@ -2331,6 +2367,8 @@ function AdminView({ onResetRole }) {
         <div className="px-5 py-3 border-t border-white/10">
           <div className="text-[10px] text-white/40 mb-1">KASSA ÜÇÜN IP ÜNVAN</div>
           <div className="font-mono text-sm font-bold text-[#4ade80]">{ip || "tapılmadı"}</div>
+          <div className="text-[10px] text-white/40 mt-2 mb-1">KASSA ÜÇÜN TOKEN</div>
+          <div className="font-mono text-sm font-bold text-[#fbbf24] tracking-widest">{netToken || "—"}</div>
         </div>
       </div>
       <div className="flex-1 p-6 overflow-auto">
@@ -2353,10 +2391,10 @@ function ConnectionBanner({ connected }) {
   );
 }
 
-function MainApp({ role, serverUrl, onResetRole }) {
+function MainApp({ role, serverUrl, token, onResetRole }) {
   const [app, setApp] = useState("kassa");
   return (
-    <MarketProvider serverUrl={serverUrl}>
+    <MarketProvider serverUrl={serverUrl} token={token}>
       <Inner role={role} app={app} setApp={setApp} onResetRole={onResetRole} />
     </MarketProvider>
   );
@@ -2441,9 +2479,9 @@ function Inner({ role, app, setApp, onResetRole }) {
 }
 
 export default function App() {
-  const { role, serverUrl, setRole, reset } = useDeviceRole();
+  const { role, serverUrl, token, setRole, reset } = useDeviceRole();
   if (!role) {
-    return <RoleSetup onDone={(r, url) => setRole(r, url)} />;
+    return <RoleSetup onDone={(r, url, tok) => setRole(r, url, tok)} />;
   }
-  return <MainApp role={role} serverUrl={serverUrl} onResetRole={reset} />;
+  return <MainApp role={role} serverUrl={serverUrl} token={token} onResetRole={reset} />;
 }
