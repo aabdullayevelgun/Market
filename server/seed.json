@@ -1,0 +1,47 @@
+{
+  "products": [
+    { "kod": "5449000000996", "ad": "Coca Cola 1L", "kat": "İçkilər", "alish": 1.2, "satish": 1.6, "endirim": 0, "stok": 84, "minimum": 20, "novu": "eded", "tereziKodu": "" },
+    { "kod": "4760095000119", "ad": "Çörək (Kənd çörəyi)", "kat": "Çörək", "alish": 0.32, "satish": 0.4, "endirim": 0, "stok": 22, "minimum": 30, "novu": "eded", "tereziKodu": "" },
+    { "kod": "4760095000157", "ad": "Süd 1L", "kat": "Süd məhsulları", "alish": 1.05, "satish": 1.3, "endirim": 0, "stok": 7, "minimum": 20, "novu": "eded", "tereziKodu": "" },
+    { "kod": "4760095000126", "ad": "Su 1.5L", "kat": "İçkilər", "alish": 0.35, "satish": 0.5, "endirim": 0, "stok": 126, "minimum": 40, "novu": "eded", "tereziKodu": "" },
+    { "kod": "8683130012345", "ad": "Çay Doğuş 500gr", "kat": "Çay", "alish": 3.4, "satish": 4.5, "endirim": 10, "stok": 41, "minimum": 15, "novu": "eded", "tereziKodu": "" },
+    { "kod": "8697418023456", "ad": "Ariel Yuyucu 3kg", "kat": "Məişət", "alish": 9.8, "satish": 12.9, "endirim": 15, "stok": 9, "minimum": 15, "novu": "eded", "tereziKodu": "" },
+    { "kod": "2000000000010", "ad": "Pomidor (çəki ilə)", "kat": "Tərəvəz", "alish": 1.5, "satish": 2.2, "endirim": 0, "stok": 45, "minimum": 10, "novu": "çəki", "tereziKodu": "00010" }
+  ],
+  "sales": [
+    {
+      "no": "#000921", "tarix": "20.08.2026 14:35", "kassir": "Kassir 01", "say": 5, "meblegh": 18.72,
+      "odenish": "KART", "status": "Tamamlandı",
+      "items": [
+        { "kod": "5449000000996", "ad": "Coca Cola 1L", "qiymet": 1.6, "endirim": 0, "miqdar": 1 },
+        { "kod": "4760095000119", "ad": "Çörək (Kənd çörəyi)", "qiymet": 0.4, "endirim": 0, "miqdar": 1 },
+        { "kod": "4760095000157", "ad": "Süd 1L", "qiymet": 1.3, "endirim": 0, "miqdar": 1 },
+        { "kod": "8683130012345", "ad": "Çay Doğuş 500gr", "qiymet": 4.5, "endirim": 10, "miqdar": 1 },
+        { "kod": "8697418023456", "ad": "Ariel Yuyucu 3kg", "qiymet": 12.9, "endirim": 15, "miqdar": 1 }
+      ]
+    }
+  ],
+  "employees": [
+    { "ad": "Kassir 01", "rol": "Kassir", "icaze": "Yalnız kassa", "status": "Aktiv", "giris": "14:35" },
+    { "ad": "Kassir 02", "rol": "Kassir", "icaze": "Yalnız kassa", "status": "Aktiv", "giris": "13:55" },
+    { "ad": "Elvin", "rol": "Rəhbər", "icaze": "Tam giriş", "status": "Aktiv", "giris": "14:42" }
+  ],
+  "suppliers": [
+    { "ad": "Araz Distribusiya", "tel": "050 000 00 00", "sonAlish": "20.08.2026", "meblegh": 1240, "borc": 0, "status": "Aktiv" },
+    { "ad": "Qida Təchizat MMC", "tel": "051 000 00 00", "sonAlish": "18.08.2026", "meblegh": 860, "borc": 320, "status": "Borc var" },
+    { "ad": "Məişət MMC", "tel": "055 000 00 00", "sonAlish": "16.08.2026", "meblegh": 1480, "borc": 0, "status": "Aktiv" },
+    { "ad": "İçki Distribusiya", "tel": "070 000 00 00", "sonAlish": "15.08.2026", "meblegh": 2160, "borc": 540, "status": "Borc var" }
+  ],
+  "settings": {
+    "magazaAdi": "ZƏHRƏ MARKET",
+    "voen": "1234567891",
+    "telefon": "012 123 45 67",
+    "unvan": "Bakı şəhəri, Nəsimi r-nu",
+    "valyuta": "AZN",
+    "printer": "Printer 01 — Aktiv",
+    "avtomatikCek": true,
+    "endirimSistemi": true,
+    "tereziPrefiks": "22",
+    "adminSifre": "2580"
+  }
+}

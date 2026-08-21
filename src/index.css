@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Print-only report area used by the "PDF HESABATINI YÜKLƏ" button.
+   Everything else on the page is hidden while printing so only the
+   generated report shows up (the person then picks "Microsoft Print to PDF"
+   as their printer to save it as an actual PDF file). */
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+  #zehra-print-area,
+  #zehra-print-area * {
+    visibility: visible !important;
+  }
+  #zehra-print-area {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+  }
+}
