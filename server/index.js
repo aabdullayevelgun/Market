@@ -10,12 +10,24 @@ const os = require("os");
 const crypto = require("crypto");
 
 function generateToken() {
-  return crypto.randomBytes(4).toString("hex").toUpperCase();
+  return crypto.randomBytes(16).toString("hex").toUpperCase();
 }
 
 function isLocalRequest(req) {
   const ip = req.ip || (req.connection && req.connection.remoteAddress) || "";
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
+// The Admin PC (physically trusted, talks to its own server over loopback)
+// is always authorized. Any other device — a Kassa PC, or anyone else on the
+// LAN who has the shared token — must also present the admin password before
+// it can touch admin-only data (settings, restore, delete, sales reset).
+// Without this, the client-side "admin panel password" screen was cosmetic:
+// a Kassa device could call these routes directly over HTTP and skip it.
+function isAdminAuthorized(req, data) {
+  if (isLocalRequest(req)) return true;
+  const pw = req.header("x-admin-password");
+  return !!pw && pw === (data.settings.adminSifre || "2580");
 }
 
 function getLocalIp() {
@@ -28,6 +40,12 @@ function getLocalIp() {
     }
   }
   return null;
+}
+
+function nowStr() {
+  const d = new Date();
+  const pad2 = (n) => String(n).padStart(2, "0");
+  return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 function getDataFile(userDataDir) {
@@ -82,6 +100,7 @@ function loadData(dataFile) {
     data.settings.apiToken = generateToken();
     writeFileAtomic(dataFile, JSON.stringify(data, null, 2));
   }
+  if (!Array.isArray(data.stockMovements)) data.stockMovements = [];
   return data;
 }
 
@@ -139,11 +158,18 @@ function startServer(userDataDir, port = 4000, onError) {
   });
 
   app.get("/api/state", (req, res) => {
-    res.json(loadData(dataFile));
+    const data = loadData(dataFile);
+    // Never let a non-admin caller (a Kassa PC, or anyone else holding just
+    // the LAN token) read the admin password in plaintext — that would let
+    // them skip the admin-panel password prompt entirely.
+    if (isAdminAuthorized(req, data)) return res.json(data);
+    const { adminSifre, ...safeSettings } = data.settings;
+    res.json({ ...data, settings: safeSettings });
   });
 
   app.post("/api/products", (req, res) => {
     const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
     data.products.push(req.body);
     saveData(dataFile, data);
     res.json(data);
@@ -151,6 +177,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.put("/api/products/:kod", (req, res) => {
     const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
     data.products = data.products.map((p) =>
       p.kod === req.params.kod ? { ...p, ...req.body } : p
     );
@@ -160,6 +187,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.delete("/api/products/:kod", (req, res) => {
     const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
     data.products = data.products.filter((p) => p.kod !== req.params.kod);
     saveData(dataFile, data);
     res.json(data);
@@ -167,6 +195,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.post("/api/suppliers", (req, res) => {
     const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
     data.suppliers.unshift(req.body);
     saveData(dataFile, data);
     res.json(data);
@@ -174,6 +203,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.put("/api/suppliers/:ad", (req, res) => {
     const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
     const target = decodeURIComponent(req.params.ad);
     data.suppliers = data.suppliers.map((s) => (s.ad === target ? { ...s, ...req.body } : s));
     saveData(dataFile, data);
@@ -182,6 +212,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.delete("/api/suppliers/:ad", (req, res) => {
     const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
     const target = decodeURIComponent(req.params.ad);
     data.suppliers = data.suppliers.filter((s) => s.ad !== target);
     saveData(dataFile, data);
@@ -190,6 +221,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.post("/api/employees", (req, res) => {
     const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
     data.employees.unshift(req.body);
     saveData(dataFile, data);
     res.json(data);
@@ -197,6 +229,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.delete("/api/employees/:ad", (req, res) => {
     const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
     data.employees = data.employees.filter((e) => e.ad !== decodeURIComponent(req.params.ad));
     saveData(dataFile, data);
     res.json(data);
@@ -214,16 +247,50 @@ function startServer(userDataDir, port = 4000, onError) {
     res.json(data);
   });
 
+  // Stock-in ("Mal gəldi", delta > 0) and stock-out / write-off ("Stokdan
+  // çıxar", delta < 0 — reason required) both go through here instead of the
+  // product PUT route, so every change to the total is recorded as its own
+  // movement with a reason, not just silently overwritten.
+  app.post("/api/stock/adjust", (req, res) => {
+    const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    const { kod, delta, reason } = req.body || {};
+    const change = parseInt(delta, 10);
+    if (!kod || !change) return res.status(400).json({ error: "kod və delta tələb olunur." });
+    if (change < 0 && !reason) return res.status(400).json({ error: "Stokdan çıxarmaq üçün səbəb tələb olunur." });
+    const product = data.products.find((p) => p.kod === kod);
+    if (!product) return res.status(404).json({ error: "Məhsul tapılmadı." });
+    product.stok = Math.max(0, (product.stok || 0) + change);
+    data.stockMovements.unshift({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      tarix: nowStr(),
+      kod: product.kod,
+      ad: product.ad,
+      tip: change > 0 ? "Giriş" : "Çıxış",
+      miqdar: Math.abs(change),
+      sebeb: change > 0 ? reason || "Mal gəlişi" : reason,
+      qaliq: product.stok,
+    });
+    saveData(dataFile, data);
+    res.json(data);
+  });
+
   app.put("/api/settings", (req, res) => {
     const data = loadData(dataFile);
-    data.settings = req.body;
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    // Merge instead of replacing wholesale, and never let a client overwrite
+    // the LAN token through this route — that would let anyone who currently
+    // holds it lock every other device out by rotating it from underneath them.
+    const { apiToken, ...incoming } = req.body || {};
+    data.settings = { ...data.settings, ...incoming, apiToken: data.settings.apiToken };
     saveData(dataFile, data);
     res.json(data);
   });
 
   app.post("/api/products/import", (req, res) => {
-    const incoming = Array.isArray(req.body.products) ? req.body.products : [];
     const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    const incoming = Array.isArray(req.body.products) ? req.body.products : [];
     incoming.forEach((p) => {
       const idx = data.products.findIndex((existing) => existing.kod === p.kod);
       if (idx >= 0) data.products[idx] = { ...data.products[idx], ...p };
@@ -235,22 +302,29 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.post("/api/sales/reset", (req, res) => {
     const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
     data.sales = [];
     saveData(dataFile, data);
     res.json(data);
   });
 
   app.post("/api/restore", (req, res) => {
+    const data = loadData(dataFile);
+    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
     const incoming = req.body;
-    const data = {
+    const restored = {
       products: Array.isArray(incoming.products) ? incoming.products : [],
       sales: Array.isArray(incoming.sales) ? incoming.sales : [],
       employees: Array.isArray(incoming.employees) ? incoming.employees : [],
       suppliers: Array.isArray(incoming.suppliers) ? incoming.suppliers : [],
-      settings: incoming.settings && typeof incoming.settings === "object" ? incoming.settings : loadData(dataFile).settings,
+      // apiToken is never replaced by a restore, same reasoning as PUT /api/settings.
+      settings:
+        incoming.settings && typeof incoming.settings === "object"
+          ? { ...data.settings, ...incoming.settings, apiToken: data.settings.apiToken }
+          : data.settings,
     };
-    saveData(dataFile, data);
-    res.json(data);
+    saveData(dataFile, restored);
+    res.json(restored);
   });
 
   const httpServer = app.listen(port, "0.0.0.0", () => {

@@ -115,16 +115,20 @@ const CHART_DATA = [
 
 const fmt = (n) => (n || 0).toLocaleString("az-AZ", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+// Fixed low-stock threshold — not configurable per product. Below this,
+// items are flagged/sorted to the top everywhere stock status is shown.
+const LOW_STOCK_ESIYI = 5;
+
 const mehsulStatus = (p) => {
   if (p.endirim > 0) return "Endirim";
   if (p.stok <= 0) return "Bitib";
-  if (p.stok < p.minimum) return "Azalır";
+  if (p.stok <= LOW_STOCK_ESIYI) return "Azalır";
   return "Normal";
 };
 
 const stokVeziyyet = (p) => {
   if (p.stok <= 0) return "Təcili";
-  if (p.stok < p.minimum) return "Sifariş ver";
+  if (p.stok <= LOW_STOCK_ESIYI) return "Sifariş ver";
   return "Normal";
 };
 
@@ -205,15 +209,38 @@ function MarketProvider({ children, serverUrl, token = "" }) {
     localStorage.setItem(PENDING_SALES_KEY, JSON.stringify(list));
   };
 
-  const authHeaders = () => (token ? { "x-api-token": token } : {});
+  // Set only after the Admin-panel password prompt is passed (see Inner/
+  // submitPw). Kept in memory only, never persisted — sent alongside the
+  // shared LAN token so the server can enforce admin-only routes itself,
+  // instead of trusting the client not to call them.
+  const [adminPw, setAdminPw] = useState("");
+  const authHeaders = () => ({
+    ...(token ? { "x-api-token": token } : {}),
+    ...(adminPw ? { "x-admin-password": adminPw } : {}),
+  });
 
+  // The full store (400+ products, all sales history, stock movements) is
+  // re-fetched every few seconds so a Kassa PC picks up changes made on the
+  // Admin PC (and vice versa). As that history grows over months, re-parsing
+  // and re-rendering the *entire* app on every poll — even when nothing
+  // actually changed, which is most of the time — got heavy enough on the
+  // shop's old Windows 7 hardware to make typing into a just-opened field
+  // feel frozen for minutes if a poll landed mid-interaction. Two guards:
+  // skip the JSON.parse + re-render entirely when the raw response is
+  // byte-identical to last time, and don't poll at all while a modal (i.e.
+  // someone is actively filling in a form) is open.
+  const lastRawRef = React.useRef("");
   const refresh = async () => {
+    if (parseInt(document.body.dataset.modalCount || "0", 10) > 0) return;
     try {
       const res = await fetch(`${serverUrl}/api/state`, { headers: authHeaders() });
       if (!res.ok) throw new Error("bad response");
-      const data = await res.json();
-      setState(data);
+      const text = await res.text();
       setConnected(true);
+      if (text !== lastRawRef.current) {
+        lastRawRef.current = text;
+        setState(JSON.parse(text));
+      }
     } catch (err) {
       setConnected(false);
     } finally {
@@ -237,6 +264,7 @@ function MarketProvider({ children, serverUrl, token = "" }) {
       if (!res.ok) throw new Error("bad response");
       const data = await res.json();
       setState(data);
+      lastRawRef.current = JSON.stringify(data);
       setConnected(true);
       return true;
     } catch (err) {
@@ -247,6 +275,10 @@ function MarketProvider({ children, serverUrl, token = "" }) {
 
   const addProduct = (p) => call("POST", "/api/products", p);
   const updateProduct = (kod, patch) => call("PUT", `/api/products/${encodeURIComponent(kod)}`, patch);
+  // delta > 0 = mal gəldi (stock-in), delta < 0 = stokdan çıxar (write-off,
+  // reason required) — recorded as a stock movement instead of silently
+  // overwriting the total.
+  const adjustStockBy = (kod, delta, reason) => call("POST", "/api/stock/adjust", { kod, delta, reason });
   const deleteProduct = (kod) => call("DELETE", `/api/products/${encodeURIComponent(kod)}`);
   const adjustStock = (kod, newStok) => updateProduct(kod, { stok: newStok });
   const addSupplier = (s) => call("POST", "/api/suppliers", s);
@@ -291,9 +323,9 @@ function MarketProvider({ children, serverUrl, token = "" }) {
     sales: [...pendingSales.map((s) => ({ ...s, _pending: true })), ...state.sales],
     pendingCount: pendingSales.length,
     connected, loading,
-    addProduct, updateProduct, deleteProduct, adjustStock,
+    addProduct, updateProduct, deleteProduct, adjustStock, adjustStockBy,
     addSupplier, updateSupplier, deleteSupplier, addEmployee, deleteEmployee, addSale, setSettings, restoreBackup,
-    importProducts, resetSales,
+    importProducts, resetSales, setAdminPw,
   };
 
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>;
@@ -580,8 +612,14 @@ function KassaView({ role }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [method, setMethod] = useState("nagd");
   const [received, setReceived] = useState("0.00");
-  const [cashPart, setCashPart] = useState("0.00");
   const [cardPart, setCardPart] = useState("0.00");
+  // Split (Qarışıq) payment used to make the cashier compute the cash
+  // portion themselves before it would accept anything ("50 qəpiyi kartdan
+  // çək" meant they had to work out the other 1.00 AZN by hand). Now the
+  // cashier only enters the card amount and, optionally, the cash actually
+  // handed over — the cash portion and change are derived, same as a plain
+  // cash sale.
+  const [mixedReceived, setMixedReceived] = useState("");
   const [lastSale, setLastSale] = useState(null);
   const [viewSale, setViewSale] = useState(null);
   const [scanMsg, setScanMsg] = useState(null);
@@ -594,8 +632,14 @@ function KassaView({ role }) {
   const unitCount = cart.reduce((s, i) => s + i.miqdar, 0);
   const change = Math.max(0, (parseFloat(received) || 0) - total);
   const insufficientCash = method === "nagd" && (parseFloat(received) || 0) < total;
-  const mixedSum = (parseFloat(cashPart) || 0) + (parseFloat(cardPart) || 0);
-  const mixedMismatch = method === "qarisiq" && Math.abs(mixedSum - total) > 0.001;
+  // The card amount is what the cashier actually enters; the cash portion
+  // is always whatever's left of the total, never typed in by hand.
+  const mixedCardPart = parseFloat(cardPart) || 0;
+  const mixedCashPart = Math.max(0, total - mixedCardPart);
+  const mixedCardTooHigh = method === "qarisiq" && mixedCardPart > total + 0.001;
+  const mixedChange = Math.max(0, (parseFloat(mixedReceived) || 0) - mixedCashPart);
+  const mixedReceivedInsufficient =
+    method === "qarisiq" && mixedReceived.trim() !== "" && (parseFloat(mixedReceived) || 0) < mixedCashPart - 0.001;
 
   const matches = useMemo(() => {
     if (!query.trim()) return [];
@@ -787,7 +831,7 @@ function KassaView({ role }) {
 
   const confirmSale = () => {
     if (method === "nagd" && (parseFloat(received) || 0) < total) return;
-    if (method === "qarisiq" && mixedMismatch) return;
+    if (method === "qarisiq" && (mixedCardTooHigh || mixedReceivedInsufficient)) return;
     const odenishLabel = method === "nagd" ? "NƏĞD" : method === "kart" ? "KART" : "QARIŞIQ";
     const sale = {
       no: generateSaleNo(sales),
@@ -798,13 +842,16 @@ function KassaView({ role }) {
       odenish: odenishLabel,
       status: "Tamamlandı",
       items: cart,
-      received: method === "nagd" ? parseFloat(received) || total : total,
-      change: method === "nagd" ? change : 0,
+      received:
+        method === "nagd" ? parseFloat(received) || total
+        : method === "qarisiq" ? (parseFloat(mixedReceived) || mixedCashPart)
+        : total,
+      change: method === "nagd" ? change : method === "qarisiq" ? mixedChange : 0,
       method,
       // Only meaningful for a split (qarışıq) payment — how much of the
       // total was paid in cash vs by card, shown as a breakdown on the receipt.
-      cashPart: method === "qarisiq" ? parseFloat(cashPart) || 0 : null,
-      cardPart: method === "qarisiq" ? parseFloat(cardPart) || 0 : null,
+      cashPart: method === "qarisiq" ? mixedCashPart : null,
+      cardPart: method === "qarisiq" ? mixedCardPart : null,
     };
     addSale(sale);
     setLastSale(sale);
@@ -823,8 +870,8 @@ function KassaView({ role }) {
     if (cart.length === 0) return;
     setMethod(m);
     setReceived(total.toFixed(2));
-    setCashPart(total.toFixed(2));
     setCardPart("0.00");
+    setMixedReceived("");
     setPayOpen(true);
   };
 
@@ -1170,28 +1217,54 @@ function KassaView({ role }) {
                 <div className="bg-gray-50 rounded-xl p-4 space-y-3">
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <div className="text-xs text-gray-500 mb-1">NƏĞD HİSSƏ</div>
-                      <input
-                        value={cashPart}
-                        onChange={(e) => setCashPart(e.target.value)}
-                        className="w-full text-lg font-bold border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-green-400"
-                      />
-                    </div>
-                    <div>
-                      <div className="text-xs text-gray-500 mb-1">KART HİSSƏ</div>
+                      <div className="text-xs text-gray-500 mb-1">KART HİSSƏSİ</div>
                       <input
                         value={cardPart}
                         onChange={(e) => setCardPart(e.target.value)}
-                        className="w-full text-lg font-bold border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-400"
+                        className={`w-full text-lg font-bold border rounded-lg px-3 py-2 focus:outline-none ${
+                          mixedCardTooHigh ? "border-red-300 focus:border-red-400" : "border-gray-200 focus:border-blue-400"
+                        }`}
                       />
                     </div>
+                    <div>
+                      <div className="text-xs text-gray-500 mb-1">NƏĞD HİSSƏSİ (avtomatik)</div>
+                      <div className="w-full text-lg font-bold border border-transparent rounded-lg px-3 py-2 bg-white">
+                        {fmt(mixedCashPart)}
+                      </div>
+                    </div>
                   </div>
-                  {mixedMismatch ? (
+                  {mixedCardTooHigh ? (
                     <div className="text-red-500 text-xs font-semibold">
-                      Nəğd + Kart cəmi ({fmt(mixedSum)} AZN) yekun məbləğə ({fmt(total)} AZN) bərabər olmalıdır.
+                      Kart hissəsi yekun məbləğdən ({fmt(total)} AZN) çox ola bilməz.
                     </div>
                   ) : (
-                    <div className="text-green-600 text-xs font-semibold">✓ Cəm düzgündür</div>
+                    <>
+                      <div>
+                        <div className="text-xs text-gray-500 mb-1">
+                          NƏĞD VERİLƏN (ixtiyari — dəyişiklik üçün, məs. iri əskinasla ödəyəndə)
+                        </div>
+                        <input
+                          value={mixedReceived}
+                          onChange={(e) => setMixedReceived(e.target.value)}
+                          placeholder={fmt(mixedCashPart)}
+                          className={`w-full text-lg font-bold border rounded-lg px-3 py-2 focus:outline-none ${
+                            mixedReceivedInsufficient ? "border-red-300 focus:border-red-400" : "border-gray-200 focus:border-green-400"
+                          }`}
+                        />
+                      </div>
+                      {mixedReceivedInsufficient ? (
+                        <div className="text-red-500 text-xs font-semibold">
+                          Nəğd verilən məbləğ nəğd hissədən ({fmt(mixedCashPart)} AZN) az ola bilməz.
+                        </div>
+                      ) : mixedChange > 0 ? (
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs text-gray-500">GERİ QAYTARILAN</span>
+                          <span className="text-xl font-bold text-green-600">{fmt(mixedChange)} AZN</span>
+                        </div>
+                      ) : (
+                        <div className="text-green-600 text-xs font-semibold">✓ Kart {fmt(mixedCardPart)} AZN + Nəğd {fmt(mixedCashPart)} AZN = {fmt(total)} AZN</div>
+                      )}
+                    </>
                   )}
                 </div>
               )}
@@ -1204,7 +1277,7 @@ function KassaView({ role }) {
                 </button>
                 <button
                   onClick={confirmSale}
-                  disabled={insufficientCash || mixedMismatch}
+                  disabled={insufficientCash || mixedCardTooHigh || mixedReceivedInsufficient}
                   className="flex-[2] bg-[#15803d] hover:bg-[#166534] disabled:opacity-40 disabled:hover:bg-[#15803d] text-white rounded-xl py-3 font-bold flex items-center justify-center gap-2"
                 >
                   <Check size={18} /> TƏSDİQLƏ
@@ -1272,7 +1345,7 @@ function KassaView({ role }) {
           character padding is the one thing every such driver gets right. */}
       {receiptOpen && viewSale && (
         <div className="print-area hidden print:block">
-          <pre style={{ fontFamily: "monospace", fontSize: "13px", fontWeight: 700, whiteSpace: "pre-wrap" }}>
+          <pre style={{ fontFamily: "monospace", fontSize: "15px", fontWeight: 700, whiteSpace: "pre-wrap", lineHeight: 1.3 }}>
             {buildReceiptText(viewSale, settings)}
           </pre>
         </div>
@@ -1347,6 +1420,10 @@ function buildReceiptText(sale, settings) {
   if (sale.odenish === "QARIŞIQ") {
     lines.push(padLine("  Nəğd:", `${fmt(sale.cashPart)} AZN`));
     lines.push(padLine("  Kart:", `${fmt(sale.cardPart)} AZN`));
+    if (sale.change > 0) {
+      lines.push(padLine("Nəğd verilən:", `${fmt(sale.received)} AZN`));
+      lines.push(padLine("Geri qaytarılan:", `${fmt(sale.change)} AZN`));
+    }
   }
   lines.push(divider);
 
@@ -1423,6 +1500,18 @@ function ReceiptContent({ sale, settings }) {
               <span>— KART:</span>
               <span>{fmt(sale.cardPart)} AZN</span>
             </div>
+            {sale.change > 0 && (
+              <>
+                <div className="flex justify-between">
+                  <span>NƏĞD VERİLƏN:</span>
+                  <span>{fmt(sale.received)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>GERİ QAYTARILAN:</span>
+                  <span>{fmt(sale.change)}</span>
+                </div>
+              </>
+            )}
           </>
         )}
       </div>
@@ -1530,7 +1619,7 @@ function IcmalPage({ onNavigate }) {
   const bugunSales = sales.filter((s) => s.tarix && s.tarix.startsWith(nowDateStr()));
   const bugunMeblegh = bugunSales.reduce((sum, s) => sum + (s.meblegh || 0), 0);
   const stokDeyeri = products.reduce((sum, p) => sum + p.stok * p.alish, 0);
-  const azalanStok = products.filter((p) => p.stok > 0 && p.stok < p.minimum).length;
+  const azalanStok = products.filter((p) => p.stok > 0 && p.stok <= LOW_STOCK_ESIYI).length;
 
   const quickActions = [
     { label: "Məhsul əlavə et", target: "mehsullar" },
@@ -1650,7 +1739,7 @@ function MehsullarPage() {
       satish: parseFloat(form.satish) || 0,
       endirim: parseFloat(form.endirim) || 0,
       stok: parseInt(form.stok, 10) || 0,
-      minimum: parseInt(form.minimum, 10) || 0,
+      minimum: LOW_STOCK_ESIYI,
       novu: form.novu === "çəki" ? "çəki" : "eded",
       vahid: form.novu === "çəki" ? "kq" : form.vahid || "ədəd",
       tereziKodu: form.tereziKodu.trim(),
@@ -1900,10 +1989,9 @@ function MehsullarPage() {
               <FormField label="Alış qiyməti (AZN)" type="number" value={form.alish} onChange={(e) => setForm({ ...form, alish: e.target.value })} />
               <FormField label="Satış qiyməti (AZN)" type="number" value={form.satish} onChange={(e) => setForm({ ...form, satish: e.target.value })} />
             </div>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 gap-3">
               <FormField label="Endirim (%)" type="number" value={form.endirim} onChange={(e) => setForm({ ...form, endirim: e.target.value })} />
               <FormField label="Stok miqdarı" type="number" value={form.stok} onChange={(e) => setForm({ ...form, stok: e.target.value })} />
-              <FormField label="Minimum stok" type="number" value={form.minimum} onChange={(e) => setForm({ ...form, minimum: e.target.value })} />
             </div>
             <div className="grid grid-cols-2 gap-3 pt-1 border-t border-gray-100 mt-1">
               <div className="pt-3">
@@ -1971,23 +2059,68 @@ function MehsullarPage() {
   );
 }
 
+const CIXIS_SEBEBLERI = ["İtib", "Xarab olub", "Vaxtı bitib", "Oğurlanıb", "Digər"];
+
 function StokPage() {
-  const { products, adjustStock } = useMarket();
-  const [adjusting, setAdjusting] = useState(null);
-  const [newStok, setNewStok] = useState("");
+  const { products, stockMovements, adjustStockBy } = useMarket();
+  const [giren, setGiren] = useState(null); // product being stocked in
+  const [cixan, setCixan] = useState(null); // product being written off
+  const [miqdar, setMiqdar] = useState("");
+  const [sebeb, setSebeb] = useState(CIXIS_SEBEBLERI[0]);
+  const [sebebQeyd, setSebebQeyd] = useState("");
+  const [error, setError] = useState("");
 
   const totalUnits = products.reduce((s, p) => s + p.stok, 0);
-  const lowStock = products.filter((p) => p.stok > 0 && p.stok < p.minimum).length;
+  const lowStock = products.filter((p) => p.stok > 0 && p.stok <= LOW_STOCK_ESIYI).length;
   const outStock = products.filter((p) => p.stok <= 0).length;
   const stockValue = products.reduce((s, p) => s + p.stok * p.alish, 0);
 
-  const openAdjust = (p) => {
-    setAdjusting(p);
-    setNewStok(String(p.stok));
+  // Low/out-of-stock items always float to the top so they're the first
+  // thing seen on this page, not buried in a long alphabetical list.
+  const sorted = [...products].sort((a, b) => {
+    const aLow = a.stok <= LOW_STOCK_ESIYI;
+    const bLow = b.stok <= LOW_STOCK_ESIYI;
+    if (aLow !== bLow) return aLow ? -1 : 1;
+    return a.stok - b.stok;
+  });
+
+  const openGiren = (p) => { setGiren(p); setMiqdar(""); setError(""); };
+  const openCixan = (p) => { setCixan(p); setMiqdar(""); setSebeb(CIXIS_SEBEBLERI[0]); setSebebQeyd(""); setError(""); };
+
+  // adjustStockBy resolves to false on any failure (no server connection,
+  // wrong/missing admin auth, etc.) — closing the modal regardless used to
+  // make a failed save look identical to a successful one. Now it stays
+  // open with a message instead of silently doing nothing.
+  const saveGiren = async () => {
+    const n = parseInt(miqdar, 10);
+    if (!n || n <= 0) { setError("Miqdarı düzgün daxil edin."); return; }
+    setError("");
+    const ok = await adjustStockBy(giren.kod, n, "Mal gəlişi");
+    if (!ok) { setError("Yadda saxlanmadı — serverlə əlaqəni yoxlayın."); return; }
+    setGiren(null);
   };
-  const save = () => {
-    adjustStock(adjusting.kod, Math.max(0, parseInt(newStok, 10) || 0));
-    setAdjusting(null);
+  const saveCixan = async () => {
+    const n = parseInt(miqdar, 10);
+    if (!n || n <= 0) { setError("Miqdarı düzgün daxil edin."); return; }
+    if (n > cixan.stok) { setError("Mövcud stokdan çox ola bilməz."); return; }
+    setError("");
+    const reason = sebeb === "Digər" ? (sebebQeyd.trim() || "Digər") : sebeb;
+    const ok = await adjustStockBy(cixan.kod, -n, reason);
+    if (!ok) { setError("Yadda saxlanmadı — serverlə əlaqəni yoxlayın."); return; }
+    setCixan(null);
+  };
+
+  // "Excel-ə export" of the movement log (not the product list) — every
+  // stock-in and every write-off, with its reason, so a full audit report
+  // can be pulled without digging through the app.
+  const exportMovements = () => {
+    const header = ["Tarix", "Barkod", "Ad", "Tip", "Miqdar", "Səbəb", "Əməliyyatdan sonra qalıq"];
+    const rows = (stockMovements || []).map((m) => [m.tarix, m.kod, m.ad, m.tip, m.miqdar, m.sebeb || "", m.qaliq]);
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+    ws["!cols"] = header.map((h) => ({ wch: h === "Ad" ? 32 : h === "Səbəb" ? 20 : 14 }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Stok hərəkətləri");
+    XLSX.writeFile(wb, `zehra-market-stok-hereketleri-${nowDateStr().replace(/\./g, "-")}.xlsx`);
   };
 
   return (
@@ -1995,33 +2128,35 @@ function StokPage() {
       <PageHeader title="Stok" />
       <div className="grid grid-cols-4 gap-4 mb-5">
         <StatCard label="Ümumi stok" value={totalUnits.toLocaleString("az-AZ")} sub="ədəd" icon={Boxes} tone="green" />
-        <StatCard label="Azalan stok" value={String(lowStock)} sub="məhsul" icon={AlertTriangle} tone="amber" />
+        <StatCard label="Azalan stok" value={String(lowStock)} sub={`məhsul (≤ ${LOW_STOCK_ESIYI} ədəd)`} icon={AlertTriangle} tone="amber" />
         <StatCard label="Bitən stok" value={String(outStock)} sub="məhsul" icon={XCircle} tone="red" />
         <StatCard label="Stok dəyəri" value={`${fmt(stockValue)} AZN`} sub="alış qiyməti ilə" icon={Wallet} tone="blue" />
       </div>
       <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-        <div className="px-5 py-3 font-bold text-sm text-gray-600 border-b border-gray-100">STOK NƏZARƏTİ</div>
+        <div className="px-5 py-3 flex items-center justify-between border-b border-gray-100">
+          <div className="font-bold text-sm text-gray-600">STOK NƏZARƏTİ</div>
+          <button onClick={exportMovements} className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 hover:text-gray-700">
+            <Download size={14} /> Stok hərəkətləri (Excel)
+          </button>
+        </div>
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-gray-400 text-xs">
-              <th className="py-2 px-5">Məhsul</th><th className="py-2 px-5">Mövcud</th><th className="py-2 px-5">Minimum</th>
-              <th className="py-2 px-5">Fərq</th><th className="py-2 px-5">Vəziyyət</th><th className="py-2 px-5"></th>
+              <th className="py-2 px-5">Məhsul</th><th className="py-2 px-5">Mövcud</th>
+              <th className="py-2 px-5">Vəziyyət</th><th className="py-2 px-5"></th>
             </tr>
           </thead>
           <tbody>
-            {products.map((p) => {
-              const ferq = p.stok - p.minimum;
+            {sorted.map((p) => {
+              const low = p.stok <= LOW_STOCK_ESIYI;
               return (
-                <tr key={p.kod} className="border-t border-gray-100">
-                  <td className="py-3 px-5 font-medium">{p.ad}</td>
-                  <td className="py-3 px-5">{p.stok}</td>
-                  <td className="py-3 px-5">{p.minimum}</td>
-                  <td className={`py-3 px-5 font-semibold ${ferq < 0 ? "text-red-500" : "text-green-600"}`}>
-                    {ferq > 0 ? "+" : ""}{ferq}
-                  </td>
+                <tr key={p.kod} className={`border-t border-gray-100 ${low ? "bg-red-50" : ""}`}>
+                  <td className={`py-3 px-5 font-medium ${low ? "text-red-700" : ""}`}>{p.ad}</td>
+                  <td className={`py-3 px-5 font-semibold ${low ? "text-red-600" : ""}`}>{p.stok}</td>
                   <td className="py-3 px-5"><StatusPill status={stokVeziyyet(p)} /></td>
-                  <td className="py-3 px-5">
-                    <button onClick={() => openAdjust(p)} className="text-blue-600 text-xs font-semibold">STOKU DƏYİŞ</button>
+                  <td className="py-3 px-5 flex gap-3">
+                    <button onClick={() => openGiren(p)} className="text-green-600 text-xs font-semibold">MAL GƏLDİ</button>
+                    <button onClick={() => openCixan(p)} className="text-red-600 text-xs font-semibold">STOKDAN ÇIXAR</button>
                   </td>
                 </tr>
               );
@@ -2030,16 +2165,49 @@ function StokPage() {
         </table>
       </div>
 
-      {adjusting && (
-        <Modal title={`Stoku dəyiş — ${adjusting.ad}`} onClose={() => setAdjusting(null)}>
+      {giren && (
+        <Modal title={`Mal gəldi — ${giren.ad}`} onClose={() => setGiren(null)}>
           <div className="space-y-4">
-            <FormField label="Yeni stok miqdarı" type="number" value={newStok} onChange={(e) => setNewStok(e.target.value)} />
+            <div className="text-xs text-gray-500">Mövcud stok: <span className="font-semibold">{giren.stok}</span></div>
+            <FormField label="Əlavə olunan miqdar" type="number" value={miqdar} onChange={(e) => setMiqdar(e.target.value)} autoFocus />
+            {error && <div className="text-red-500 text-xs font-semibold">{error}</div>}
             <div className="flex gap-2">
-              <button onClick={() => setAdjusting(null)} className="flex-1 py-2.5 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
+              <button onClick={() => setGiren(null)} className="flex-1 py-2.5 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
                 Ləğv et
               </button>
-              <button onClick={save} className="flex-[2] bg-[#16a34a] hover:bg-[#15803d] text-white rounded-xl py-2.5 font-bold text-sm">
-                Yadda saxla
+              <button onClick={saveGiren} className="flex-[2] bg-[#16a34a] hover:bg-[#15803d] text-white rounded-xl py-2.5 font-bold text-sm">
+                Əlavə et
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {cixan && (
+        <Modal title={`Stokdan çıxar — ${cixan.ad}`} onClose={() => setCixan(null)}>
+          <div className="space-y-4">
+            <div className="text-xs text-gray-500">Mövcud stok: <span className="font-semibold">{cixan.stok}</span></div>
+            <FormField label="Çıxarılan miqdar" type="number" value={miqdar} onChange={(e) => setMiqdar(e.target.value)} autoFocus />
+            <div>
+              <div className="text-xs text-gray-500 mb-1">Səbəb</div>
+              <select
+                value={sebeb}
+                onChange={(e) => setSebeb(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-green-400"
+              >
+                {CIXIS_SEBEBLERI.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            {sebeb === "Digər" && (
+              <FormField label="Qeyd" value={sebebQeyd} onChange={(e) => setSebebQeyd(e.target.value)} />
+            )}
+            {error && <div className="text-red-500 text-xs font-semibold">{error}</div>}
+            <div className="flex gap-2">
+              <button onClick={() => setCixan(null)} className="flex-1 py-2.5 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
+                Ləğv et
+              </button>
+              <button onClick={saveCixan} className="flex-[2] bg-red-600 hover:bg-red-700 text-white rounded-xl py-2.5 font-bold text-sm">
+                Çıxar
               </button>
             </div>
           </div>
@@ -2227,6 +2395,18 @@ function SatislarPage() {
                     <span>— Kart hissə</span>
                     <span className="font-semibold">{fmt(detailSale.cardPart)} AZN</span>
                   </div>
+                  {detailSale.change > 0 && (
+                    <>
+                      <div className="flex justify-between text-xs text-gray-500">
+                        <span>Nəğd verilən</span>
+                        <span className="font-semibold">{fmt(detailSale.received)} AZN</span>
+                      </div>
+                      <div className="flex justify-between text-xs text-gray-500">
+                        <span>Geri qaytarılan</span>
+                        <span className="font-semibold">{fmt(detailSale.change)} AZN</span>
+                      </div>
+                    </>
+                  )}
                 </>
               )}
               {detailSale.odenish === "NƏĞD" && detailSale.received != null && (
@@ -3221,7 +3401,7 @@ function MainApp({ role, serverUrl, token, onResetRole }) {
 }
 
 function Inner({ role, app, setApp, onResetRole }) {
-  const { connected, settings, pendingCount } = useMarket();
+  const { connected, settings, pendingCount, setAdminPw } = useMarket();
   const [pwOpen, setPwOpen] = useState(false);
   const [pwInput, setPwInput] = useState("");
   const [pwError, setPwError] = useState(false);
@@ -3240,6 +3420,7 @@ function Inner({ role, app, setApp, onResetRole }) {
   const submitPw = () => {
     if (pwInput === (settings.adminSifre || "2580")) {
       setUnlocked(true);
+      setAdminPw(pwInput);
       setPwOpen(false);
       setApp("admin");
     } else {
