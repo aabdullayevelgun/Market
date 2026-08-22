@@ -1258,14 +1258,98 @@ function KassaView() {
 
       {/* Hidden print-only copy of whatever receipt is currently open — this
           is what actually reaches the printer (see printReceipt below), the
-          modal above is only what the cashier sees on screen. */}
+          modal above is only what the cashier sees on screen. Plain
+          monospace text, not the styled flexbox layout: many receipt
+          printers are installed under a "Generic / Text Only" Windows
+          driver that doesn't render CSS layout — it just dumps characters,
+          which turned flex-aligned prices into stray dot leaders. Fixed
+          character padding is the one thing every such driver gets right. */}
       {receiptOpen && viewSale && (
         <div className="print-area hidden print:block">
-          <ReceiptContent sale={viewSale} settings={settings} />
+          <pre style={{ fontFamily: "monospace", fontSize: "13px", fontWeight: 700, whiteSpace: "pre-wrap" }}>
+            {buildReceiptText(viewSale, settings)}
+          </pre>
         </div>
       )}
     </div>
   );
+}
+
+// 32 characters fits standard 58mm thermal paper at the typical font the
+// printer falls back to; also reads fine on wider 80mm rolls.
+const RECEIPT_WIDTH = 32;
+function padLine(left, right, width = RECEIPT_WIDTH) {
+  left = String(left);
+  right = String(right);
+  const gap = Math.max(1, width - left.length - right.length);
+  return left + " ".repeat(gap) + right;
+}
+function centerLine(text, width = RECEIPT_WIDTH) {
+  text = String(text);
+  if (text.length >= width) return text;
+  const padTotal = width - text.length;
+  const left = Math.floor(padTotal / 2);
+  return " ".repeat(left) + text;
+}
+function wrapText(text, width = RECEIPT_WIDTH) {
+  const words = String(text).split(" ");
+  const lines = [];
+  let line = "";
+  for (const w of words) {
+    if ((line + " " + w).trim().length > width) {
+      if (line) lines.push(line.trim());
+      line = w;
+    } else {
+      line = (line + " " + w).trim();
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function buildReceiptText(sale, settings) {
+  const lines = [];
+  const divider = "-".repeat(RECEIPT_WIDTH);
+
+  lines.push(centerLine(settings.magazaAdi || "ZƏHRA MARKET"));
+  if (settings.unvan) wrapText(settings.unvan).forEach((l) => lines.push(centerLine(l)));
+  if (settings.telefon) lines.push(centerLine(`Tel: ${settings.telefon}`));
+  if (settings.voen) lines.push(centerLine(`VÖEN: ${settings.voen}`));
+  if (settings.cekBasliqQeydi) wrapText(settings.cekBasliqQeydi).forEach((l) => lines.push(centerLine(l)));
+  lines.push(divider);
+
+  lines.push(padLine(`Çek: ${sale.no}`, ""));
+  lines.push(sale.tarix);
+  lines.push(`Kassir: ${sale.kassir}`);
+  lines.push(divider);
+
+  sale.items.forEach((it) => {
+    const lineSum = fmt(it.qiymet * it.miqdar * (1 - it.endirim / 100));
+    wrapText(it.ad).forEach((l) => lines.push(l));
+    const qtyLabel = it.novu === "çəki" ? `${it.miqdar.toFixed(3)}kq` : `${it.miqdar} x ${fmt(it.qiymet)}`;
+    lines.push(padLine(`  ${qtyLabel}`, `${lineSum} AZN`));
+  });
+  lines.push(divider);
+
+  lines.push(padLine("YEKUN:", `${fmt(sale.meblegh)} AZN`));
+  lines.push("");
+  lines.push(padLine("Ödəniş növü:", sale.odenish));
+  if (sale.odenish === "NƏĞD" && sale.received != null) {
+    lines.push(padLine("Alınan:", `${fmt(sale.received)} AZN`));
+    lines.push(padLine("Geri qaytarılan:", `${fmt(sale.change)} AZN`));
+  }
+  if (sale.odenish === "QARIŞIQ") {
+    lines.push(padLine("  Nəğd:", `${fmt(sale.cashPart)} AZN`));
+    lines.push(padLine("  Kart:", `${fmt(sale.cardPart)} AZN`));
+  }
+  lines.push(divider);
+
+  const thanks = settings.cekTesekkurMesaji || "TƏŞƏKKÜRLƏR!\nXoş gəlmisiniz!";
+  thanks.split("\n").forEach((l) => lines.push(centerLine(l)));
+  lines.push("");
+  lines.push("");
+
+  return lines.join("\n");
 }
 
 function ReceiptContent({ sale, settings }) {
