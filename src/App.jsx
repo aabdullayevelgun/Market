@@ -604,6 +604,14 @@ function FormField({ label, ...props }) {
 function KassaView({ role }) {
   const canDiscount = role !== "kassa";
   const { products, sales, addSale, settings } = useMarket();
+  // A large imported sales history (tens of thousands of receipts) would
+  // freeze this modal if rendered in full — only the most recent ones matter
+  // here, newest first; not-yet-synced sales are prepended by useMarket().
+  const recentSales = useMemo(() => {
+    const pending = sales.filter((s) => s._pending);
+    const synced = sales.filter((s) => !s._pending).slice(-50).reverse();
+    return [...pending, ...synced];
+  }, [sales]);
   const [cart, setCart] = useState([]);
   const [query, setQuery] = useState("");
   const [discountPct, setDiscountPct] = useState("0");
@@ -1292,7 +1300,7 @@ function KassaView({ role }) {
       {historyOpen && (
         <Modal title="Son çeklər" onClose={() => setHistoryOpen(false)} widthClass="max-w-lg">
           <div className="space-y-2 -mx-1">
-            {sales.map((s) => (
+            {recentSales.map((s) => (
               <button
                 key={s.no}
                 onClick={() => openFromHistory(s)}
@@ -1695,6 +1703,8 @@ function IcmalPage({ onNavigate }) {
 
 const emptyProductForm = { kod: "", ad: "", kat: "", alish: "", satish: "", endirim: "0", stok: "", minimum: "10", novu: "eded", vahid: "ədəd", tereziKodu: "", barkodsuz: false };
 
+const MEHSUL_SEHIFE_OLCUSU = 50;
+
 function MehsullarPage() {
   const { products, addProduct, updateProduct, deleteProduct, importProducts } = useMarket();
   const [q, setQ] = useState("");
@@ -1703,10 +1713,25 @@ function MehsullarPage() {
   const [form, setForm] = useState(emptyProductForm);
   const [importMsg, setImportMsg] = useState(null);
   const fileInputRef = React.useRef(null);
+  // Product lists here can run into the tens of thousands of rows (a full
+  // 1C catalog import, for example) — rendering them all as <tr> elements
+  // at once freezes the tab, so only one page's worth ever hits the DOM.
+  const [page, setPage] = useState(0);
+  const [katFilter, setKatFilter] = useState("Hamısı");
+
+  const kategoriyalar = useMemo(
+    () => ["Hamısı", ...Array.from(new Set(products.map((p) => p.kat || "Digər"))).sort((a, b) => a.localeCompare(b, "az"))],
+    [products]
+  );
 
   const filtered = products.filter(
-    (p) => p.ad.toLowerCase().includes(q.toLowerCase()) || p.kod.includes(q)
+    (p) =>
+      (p.ad.toLowerCase().includes(q.toLowerCase()) || p.kod.includes(q)) &&
+      (katFilter === "Hamısı" || (p.kat || "Digər") === katFilter)
   );
+  const pageCount = Math.max(1, Math.ceil(filtered.length / MEHSUL_SEHIFE_OLCUSU));
+  const clampedPage = Math.min(page, pageCount - 1);
+  const paged = filtered.slice(clampedPage * MEHSUL_SEHIFE_OLCUSU, (clampedPage + 1) * MEHSUL_SEHIFE_OLCUSU);
 
   const openAdd = () => {
     setEditing(null);
@@ -1907,11 +1932,20 @@ function MehsullarPage() {
           <Search size={16} className="text-gray-400" />
           <input
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => { setQ(e.target.value); setPage(0); }}
             placeholder="Məhsul adı və ya barkod..."
             className="w-full text-sm outline-none"
           />
         </div>
+        <select
+          value={katFilter}
+          onChange={(e) => { setKatFilter(e.target.value); setPage(0); }}
+          className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm font-semibold text-gray-600 focus:outline-none focus:border-green-400 max-w-[220px]"
+        >
+          {kategoriyalar.map((k) => (
+            <option key={k} value={k}>{k}</option>
+          ))}
+        </select>
         <button onClick={downloadTemplate} className="border border-gray-200 text-gray-600 hover:border-gray-300 rounded-xl px-4 py-2.5 text-sm font-semibold whitespace-nowrap">
           Nümunə CSV
         </button>
@@ -1946,7 +1980,7 @@ function MehsullarPage() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((p) => (
+            {paged.map((p) => (
               <tr key={p.kod} className="border-t border-gray-100">
                 <td className="py-3 px-4 font-mono text-xs text-gray-500">{p.kod}</td>
                 <td className="py-3 px-4 font-medium">{p.ad}</td>
@@ -1972,6 +2006,30 @@ function MehsullarPage() {
             )}
           </tbody>
         </table>
+        {filtered.length > 0 && (
+          <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 text-xs text-gray-500">
+            <div>
+              {clampedPage * MEHSUL_SEHIFE_OLCUSU + 1}–{Math.min((clampedPage + 1) * MEHSUL_SEHIFE_OLCUSU, filtered.length)} / {filtered.length} məhsul
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPage((pg) => Math.max(0, pg - 1))}
+                disabled={clampedPage === 0}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                « Əvvəlki
+              </button>
+              <span className="font-semibold">{clampedPage + 1} / {pageCount}</span>
+              <button
+                onClick={() => setPage((pg) => Math.min(pageCount - 1, pg + 1))}
+                disabled={clampedPage >= pageCount - 1}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                Sonrakı »
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {modalOpen && (
@@ -2061,6 +2119,8 @@ function MehsullarPage() {
 
 const CIXIS_SEBEBLERI = ["İtib", "Xarab olub", "Vaxtı bitib", "Oğurlanıb", "Digər"];
 
+const STOK_SEHIFE_OLCUSU = 50;
+
 function StokPage() {
   const { products, stockMovements, adjustStockBy } = useMarket();
   const [giren, setGiren] = useState(null); // product being stocked in
@@ -2069,20 +2129,31 @@ function StokPage() {
   const [sebeb, setSebeb] = useState(CIXIS_SEBEBLERI[0]);
   const [sebebQeyd, setSebebQeyd] = useState("");
   const [error, setError] = useState("");
+  // Same rationale as MehsullarPage: a large catalog import can put tens of
+  // thousands of rows here, and rendering them all at once freezes the tab.
+  const [page, setPage] = useState(0);
+  // "azalan" (default): low/out-of-stock first, as before. "coxdan-aza" and
+  // "azdan-coxa" let the user sort purely by quantity in either direction.
+  const [siralama, setSiralama] = useState("azalan");
 
   const totalUnits = products.reduce((s, p) => s + p.stok, 0);
   const lowStock = products.filter((p) => p.stok > 0 && p.stok <= LOW_STOCK_ESIYI).length;
   const outStock = products.filter((p) => p.stok <= 0).length;
   const stockValue = products.reduce((s, p) => s + p.stok * p.alish, 0);
 
-  // Low/out-of-stock items always float to the top so they're the first
-  // thing seen on this page, not buried in a long alphabetical list.
   const sorted = [...products].sort((a, b) => {
+    if (siralama === "coxdan-aza") return b.stok - a.stok;
+    if (siralama === "azdan-coxa") return a.stok - b.stok;
+    // Default: low/out-of-stock items float to the top so they're the first
+    // thing seen on this page, not buried in a long alphabetical list.
     const aLow = a.stok <= LOW_STOCK_ESIYI;
     const bLow = b.stok <= LOW_STOCK_ESIYI;
     if (aLow !== bLow) return aLow ? -1 : 1;
     return a.stok - b.stok;
   });
+  const stokPageCount = Math.max(1, Math.ceil(sorted.length / STOK_SEHIFE_OLCUSU));
+  const stokClampedPage = Math.min(page, stokPageCount - 1);
+  const stokPaged = sorted.slice(stokClampedPage * STOK_SEHIFE_OLCUSU, (stokClampedPage + 1) * STOK_SEHIFE_OLCUSU);
 
   const openGiren = (p) => { setGiren(p); setMiqdar(""); setError(""); };
   const openCixan = (p) => { setCixan(p); setMiqdar(""); setSebeb(CIXIS_SEBEBLERI[0]); setSebebQeyd(""); setError(""); };
@@ -2135,9 +2206,20 @@ function StokPage() {
       <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
         <div className="px-5 py-3 flex items-center justify-between border-b border-gray-100">
           <div className="font-bold text-sm text-gray-600">STOK NƏZARƏTİ</div>
-          <button onClick={exportMovements} className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 hover:text-gray-700">
-            <Download size={14} /> Stok hərəkətləri (Excel)
-          </button>
+          <div className="flex items-center gap-3">
+            <select
+              value={siralama}
+              onChange={(e) => { setSiralama(e.target.value); setPage(0); }}
+              className="border border-gray-200 rounded-lg px-3 py-1.5 text-xs font-semibold text-gray-600 focus:outline-none focus:border-green-400"
+            >
+              <option value="azalan">Əvvəlcə azalan/bitən</option>
+              <option value="coxdan-aza">Stok: çoxdan aza</option>
+              <option value="azdan-coxa">Stok: azdan çoxa</option>
+            </select>
+            <button onClick={exportMovements} className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 hover:text-gray-700">
+              <Download size={14} /> Stok hərəkətləri (Excel)
+            </button>
+          </div>
         </div>
         <table className="w-full text-sm">
           <thead>
@@ -2147,7 +2229,7 @@ function StokPage() {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((p) => {
+            {stokPaged.map((p) => {
               const low = p.stok <= LOW_STOCK_ESIYI;
               return (
                 <tr key={p.kod} className={`border-t border-gray-100 ${low ? "bg-red-50" : ""}`}>
@@ -2163,6 +2245,30 @@ function StokPage() {
             })}
           </tbody>
         </table>
+        {sorted.length > 0 && (
+          <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 text-xs text-gray-500">
+            <div>
+              {stokClampedPage * STOK_SEHIFE_OLCUSU + 1}–{Math.min((stokClampedPage + 1) * STOK_SEHIFE_OLCUSU, sorted.length)} / {sorted.length} məhsul
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPage((pg) => Math.max(0, pg - 1))}
+                disabled={stokClampedPage === 0}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                « Əvvəlki
+              </button>
+              <span className="font-semibold">{stokClampedPage + 1} / {stokPageCount}</span>
+              <button
+                onClick={() => setPage((pg) => Math.min(stokPageCount - 1, pg + 1))}
+                disabled={stokClampedPage >= stokPageCount - 1}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                Sonrakı »
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {giren && (
@@ -2227,6 +2333,14 @@ function parseTarix(t) {
   return new Date(y, m - 1, d, hh || 0, mm || 0);
 }
 
+const SATIS_SEHIFE_OLCUSU = 50;
+
+// yyyy-mm-dd in local time, matching what a <input type="date"> holds.
+function isoDate(d) {
+  const pad2 = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
 function SatislarPage() {
   const { sales } = useMarket();
   const [dateFrom, setDateFrom] = useState("");
@@ -2234,6 +2348,37 @@ function SatislarPage() {
   const [kassirFilter, setKassirFilter] = useState("Hamısı");
   const [odenishFilter, setOdenishFilter] = useState("Hamısı");
   const [detailSale, setDetailSale] = useState(null);
+  // "Sürətli" period buttons — Günlük/Həftəlik/Aylıq just fill dateFrom/dateTo
+  // below, so they compose with the existing manual date range and other
+  // filters instead of being a separate filtering path.
+  const [cəldDovr, setCəldDovr] = useState("hamisi");
+  // A full 1C sales history import can run into the tens of thousands of
+  // receipts — rendering them all as <tr> elements at once freezes the tab.
+  const [page, setPage] = useState(0);
+
+  const secCəldDovr = (key) => {
+    setCəldDovr(key);
+    setPage(0);
+    const today = new Date();
+    if (key === "hamisi") {
+      setDateFrom("");
+      setDateTo("");
+    } else if (key === "gunluk") {
+      const iso = isoDate(today);
+      setDateFrom(iso);
+      setDateTo(iso);
+    } else if (key === "heftelik") {
+      const gun = (today.getDay() + 6) % 7; // Monday = 0
+      const monday = new Date(today);
+      monday.setDate(today.getDate() - gun);
+      setDateFrom(isoDate(monday));
+      setDateTo(isoDate(today));
+    } else if (key === "aylıq") {
+      const first = new Date(today.getFullYear(), today.getMonth(), 1);
+      setDateFrom(isoDate(first));
+      setDateTo(isoDate(today));
+    }
+  };
 
   const kassirs = useMemo(() => ["Hamısı", ...new Set(sales.map((s) => s.kassir).filter(Boolean))], [sales]);
 
@@ -2248,6 +2393,10 @@ function SatislarPage() {
     });
   }, [sales, dateFrom, dateTo, kassirFilter, odenishFilter]);
 
+  const satisPageCount = Math.max(1, Math.ceil(filtered.length / SATIS_SEHIFE_OLCUSU));
+  const satisClampedPage = Math.min(page, satisPageCount - 1);
+  const satisPaged = filtered.slice(satisClampedPage * SATIS_SEHIFE_OLCUSU, (satisClampedPage + 1) * SATIS_SEHIFE_OLCUSU);
+
   const totalSum = filtered.reduce((sum, s) => sum + (s.meblegh || 0), 0);
   const hasFilter = dateFrom || dateTo || kassirFilter !== "Hamısı" || odenishFilter !== "Hamısı";
   const resetFilters = () => {
@@ -2255,36 +2404,60 @@ function SatislarPage() {
     setDateTo("");
     setKassirFilter("Hamısı");
     setOdenishFilter("Hamısı");
+    setCəldDovr("hamisi");
+    setPage(0);
   };
 
   const selectCls = "bg-white border border-gray-200 rounded-full px-3 py-1.5 text-xs font-semibold text-gray-600 outline-none focus:border-green-400";
 
+  const cəldDovrler = [
+    { key: "hamisi", label: "Hamısı" },
+    { key: "gunluk", label: "Günlük" },
+    { key: "heftelik", label: "Həftəlik" },
+    { key: "aylıq", label: "Aylıq" },
+  ];
+
   return (
     <div>
       <PageHeader title="Satışlar" />
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <div className="flex items-center bg-white border border-gray-200 rounded-full p-1">
+          {cəldDovrler.map((d) => (
+            <button
+              key={d.key}
+              onClick={() => secCəldDovr(d.key)}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-full transition ${
+                cəldDovr === d.key ? "bg-[#16a34a] text-white" : "text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              {d.label}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <div className="flex items-center gap-1.5 bg-white border border-gray-200 rounded-full pl-3 pr-2 py-1.5">
           <span className="text-xs font-semibold text-gray-400">Tarix</span>
           <input
             type="date"
             value={dateFrom}
-            onChange={(e) => setDateFrom(e.target.value)}
+            onChange={(e) => { setDateFrom(e.target.value); setCəldDovr("manual"); setPage(0); }}
             className="text-xs font-semibold text-gray-600 outline-none w-[120px]"
           />
           <span className="text-xs text-gray-300">—</span>
           <input
             type="date"
             value={dateTo}
-            onChange={(e) => setDateTo(e.target.value)}
+            onChange={(e) => { setDateTo(e.target.value); setCəldDovr("manual"); setPage(0); }}
             className="text-xs font-semibold text-gray-600 outline-none w-[120px]"
           />
         </div>
-        <select value={kassirFilter} onChange={(e) => setKassirFilter(e.target.value)} className={selectCls}>
+        <select value={kassirFilter} onChange={(e) => { setKassirFilter(e.target.value); setPage(0); }} className={selectCls}>
           {kassirs.map((k) => (
             <option key={k} value={k}>{k === "Hamısı" ? "KASSİR: HAMISI" : k}</option>
           ))}
         </select>
-        <select value={odenishFilter} onChange={(e) => setOdenishFilter(e.target.value)} className={selectCls}>
+        <select value={odenishFilter} onChange={(e) => { setOdenishFilter(e.target.value); setPage(0); }} className={selectCls}>
           <option value="Hamısı">ÖDƏNİŞ: HAMISI</option>
           <option value="NƏĞD">NƏĞD</option>
           <option value="KART">KART</option>
@@ -2308,7 +2481,7 @@ function SatislarPage() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((s) => (
+            {satisPaged.map((s) => (
               <tr key={s.no} className="border-t border-gray-100">
                 <td className="py-3 px-4 font-medium">{s.no}</td>
                 <td className="py-3 px-4 text-gray-500">{s.tarix}</td>
@@ -2343,6 +2516,30 @@ function SatislarPage() {
             )}
           </tbody>
         </table>
+        {filtered.length > 0 && (
+          <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 text-xs text-gray-500">
+            <div>
+              {satisClampedPage * SATIS_SEHIFE_OLCUSU + 1}–{Math.min((satisClampedPage + 1) * SATIS_SEHIFE_OLCUSU, filtered.length)} / {filtered.length} çek
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPage((pg) => Math.max(0, pg - 1))}
+                disabled={satisClampedPage === 0}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                « Əvvəlki
+              </button>
+              <span className="font-semibold">{satisClampedPage + 1} / {satisPageCount}</span>
+              <button
+                onClick={() => setPage((pg) => Math.min(satisPageCount - 1, pg + 1))}
+                disabled={satisClampedPage >= satisPageCount - 1}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                Sonrakı »
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {detailSale && (
