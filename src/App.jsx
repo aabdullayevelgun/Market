@@ -3,7 +3,7 @@ import {
   ShoppingCart, ShoppingBasket, ScanBarcode, User, LogOut, Clock, Trash2, Plus, Minus,
   Receipt, History, XCircle, Banknote, CreditCard, Check,
   LayoutGrid, Package, Boxes, LineChart, FileBarChart2, Users, Truck,
-  Settings, ChevronRight, Search, TrendingUp, AlertTriangle, Wallet, X, Download, Upload,
+  Settings, ChevronRight, Search, TrendingUp, AlertTriangle, Wallet, X, Download, Upload, Lock,
 } from "lucide-react";
 import { BarChart, Bar, ResponsiveContainer, XAxis, Tooltip } from "recharts";
 import * as XLSX from "xlsx";
@@ -569,7 +569,8 @@ function FormField({ label, ...props }) {
 /* KASSA (POS) VIEW                                                  */
 /* ---------------------------------------------------------------- */
 
-function KassaView() {
+function KassaView({ role }) {
+  const canDiscount = role !== "kassa";
   const { products, sales, addSale, settings } = useMarket();
   const [cart, setCart] = useState([]);
   const [query, setQuery] = useState("");
@@ -987,13 +988,18 @@ function KassaView() {
               <span className="font-semibold">{fmt(subtotal)} AZN</span>
             </div>
             <div className="flex items-center justify-between text-sm">
-              <span className="text-gray-500">Endirim</span>
+              <span className="text-gray-500 flex items-center gap-1">
+                Endirim
+                {!canDiscount && <Lock size={11} className="text-gray-300" />}
+              </span>
               <div className="flex items-center gap-2">
                 <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden">
                   <input
                     value={discountPct}
-                    onChange={(e) => setDiscountPct(e.target.value)}
-                    className="w-14 text-right text-sm px-2 py-1 outline-none"
+                    onChange={(e) => canDiscount && setDiscountPct(e.target.value)}
+                    disabled={!canDiscount}
+                    title={!canDiscount ? "Endirim yalnız rəhbər tərəfindən təyin edilə bilər" : ""}
+                    className="w-14 text-right text-sm px-2 py-1 outline-none disabled:bg-gray-50 disabled:text-gray-400"
                   />
                   <span className="bg-gray-50 text-gray-400 text-xs px-2 py-1">%</span>
                 </div>
@@ -2059,6 +2065,7 @@ function SatislarPage() {
   const [dateTo, setDateTo] = useState("");
   const [kassirFilter, setKassirFilter] = useState("Hamısı");
   const [odenishFilter, setOdenishFilter] = useState("Hamısı");
+  const [detailSale, setDetailSale] = useState(null);
 
   const kassirs = useMemo(() => ["Hamısı", ...new Set(sales.map((s) => s.kassir).filter(Boolean))], [sales]);
 
@@ -2138,9 +2145,20 @@ function SatislarPage() {
                 <td className="py-3 px-4 font-medium">{s.no}</td>
                 <td className="py-3 px-4 text-gray-500">{s.tarix}</td>
                 <td className="py-3 px-4">{s.kassir}</td>
-                <td className="py-3 px-4">{s.say}</td>
+                <td className="py-3 px-4">
+                  <button onClick={() => setDetailSale(s)} className="text-blue-600 font-semibold underline decoration-dotted">
+                    {s.say}
+                  </button>
+                </td>
                 <td className="py-3 px-4 font-semibold">{fmt(s.meblegh)} AZN</td>
-                <td className="py-3 px-4">{s.odenish}</td>
+                <td className="py-3 px-4">
+                  {s.odenish}
+                  {s.odenish === "QARIŞIQ" && (
+                    <div className="text-[10px] text-gray-400">
+                      Nəğd {fmt(s.cashPart)} · Kart {fmt(s.cardPart)}
+                    </div>
+                  )}
+                </td>
                 <td className="py-3 px-4">
                   {s._pending ? (
                     <span className="bg-amber-50 text-amber-600 text-xs font-bold px-2.5 py-1 rounded-full">⏳ Gözləyir</span>
@@ -2158,6 +2176,75 @@ function SatislarPage() {
           </tbody>
         </table>
       </div>
+
+      {detailSale && (
+        <Modal title={`Çek ${detailSale.no}`} onClose={() => setDetailSale(null)} widthClass="max-w-md">
+          <div className="space-y-3">
+            <div className="text-xs text-gray-500 flex justify-between">
+              <span>{detailSale.tarix}</span>
+              <span>Kassir: {detailSale.kassir}</span>
+            </div>
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 text-left text-gray-500 text-xs">
+                    <th className="py-2 px-3">Məhsul</th>
+                    <th className="py-2 px-3">Miqdar</th>
+                    <th className="py-2 px-3 text-right">Məbləğ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(detailSale.items || []).map((it, idx) => (
+                    <tr key={it.kod + idx} className="border-t border-gray-100">
+                      <td className="py-2 px-3">{it.ad}</td>
+                      <td className="py-2 px-3 text-gray-500">
+                        {it.novu === "çəki" ? `${it.miqdar.toFixed(3)} kq` : it.miqdar}
+                      </td>
+                      <td className="py-2 px-3 text-right font-semibold">
+                        {fmt(it.qiymet * it.miqdar * (1 - it.endirim / 100))} AZN
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="border-t border-gray-100 pt-3 space-y-1.5">
+              <div className="flex justify-between text-sm font-bold">
+                <span>Yekun</span>
+                <span className="text-[#16a34a]">{fmt(detailSale.meblegh)} AZN</span>
+              </div>
+              <div className="flex justify-between text-xs text-gray-500">
+                <span>Ödəniş növü</span>
+                <span className="font-semibold">{detailSale.odenish}</span>
+              </div>
+              {detailSale.odenish === "QARIŞIQ" && (
+                <>
+                  <div className="flex justify-between text-xs text-gray-500">
+                    <span>— Nəğd hissə</span>
+                    <span className="font-semibold">{fmt(detailSale.cashPart)} AZN</span>
+                  </div>
+                  <div className="flex justify-between text-xs text-gray-500">
+                    <span>— Kart hissə</span>
+                    <span className="font-semibold">{fmt(detailSale.cardPart)} AZN</span>
+                  </div>
+                </>
+              )}
+              {detailSale.odenish === "NƏĞD" && detailSale.received != null && (
+                <>
+                  <div className="flex justify-between text-xs text-gray-500">
+                    <span>Alınan</span>
+                    <span className="font-semibold">{fmt(detailSale.received)} AZN</span>
+                  </div>
+                  <div className="flex justify-between text-xs text-gray-500">
+                    <span>Geri qaytarılan</span>
+                    <span className="font-semibold">{fmt(detailSale.change)} AZN</span>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -3206,7 +3293,7 @@ function Inner({ role, app, setApp, onResetRole }) {
           </div>
         </Modal>
       )}
-      {role === "admin" ? (app === "kassa" ? <KassaView /> : <AdminView onResetRole={onResetRole} />) : <KassaView />}
+      {role === "admin" ? (app === "kassa" ? <KassaView role={role} /> : <AdminView onResetRole={onResetRole} />) : <KassaView role={role} />}
     </div>
   );
 }
