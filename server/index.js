@@ -106,7 +106,7 @@ function writeBackup(dataFile, data) {
   }
 }
 
-function startServer(userDataDir, port = 4000) {
+function startServer(userDataDir, port = 4000, onError) {
   const dataFile = getDataFile(userDataDir);
   const app = express();
   app.use(express.json());
@@ -253,9 +253,19 @@ function startServer(userDataDir, port = 4000) {
     res.json(data);
   });
 
-  app.listen(port, "0.0.0.0", () => {
+  const httpServer = app.listen(port, "0.0.0.0", () => {
     console.log(`Zəhrə Market server: http://0.0.0.0:${port} (data: ${dataFile})`);
   });
+  // app.listen() never throws on failure (e.g. the port already being used
+  // by another program) — it fails silently via this 'error' event instead.
+  // Without handling it, the whole app looks "broken" with zero indication
+  // why. The caller (Electron's main process) uses this to show a real
+  // error dialog instead of a silent, permanent failure to start.
+  httpServer.on("error", (err) => {
+    console.error(`Server could not bind to port ${port}:`, err);
+    if (typeof onError === "function") onError(err);
+  });
+  return httpServer;
 }
 
 module.exports = { startServer };

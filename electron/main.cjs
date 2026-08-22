@@ -1,21 +1,50 @@
-import { app, BrowserWindow, ipcMain, dialog } from "electron";
-import path from "path";
-import fs from "fs";
-import net from "net";
-import { fileURLToPath } from "url";
-import { createRequire } from "module";
+const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const path = require("path");
+const fs = require("fs");
+const net = require("net");
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
 const isDev = !app.isPackaged;
+
+// Old GPU drivers (common on Windows 7 machines) frequently fail to
+// initialize hardware-accelerated rendering in Chromium, which shows up as
+// a permanently blank/white window with nothing drawn and no error at all.
+// Disabling GPU acceleration trades a little rendering performance for the
+// app actually being visible — worth it for a simple POS UI like this one.
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch("disable-gpu");
+app.commandLine.appendSwitch("disable-software-rasterizer");
+
+// Writes a persistent log line and — once the window has appeared — pops up
+// a real, readable error dialog. This is what makes a startup failure like
+// "port already in use" or "data file unreadable" visible on a packaged
+// build at all: without it, the app just silently never becomes reachable,
+// with zero indication why (this is exactly what happened after the power
+// outage — nothing in the UI hinted the local server had failed to start).
+function reportFatalStartupError(title, err) {
+  try {
+    const logPath = path.join(app.getPath("userData"), "startup-error.log");
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${title}: ${err && err.stack ? err.stack : err}\n`);
+  } catch {
+    // even logging failed — nothing more we can do locally
+  }
+  const show = () => dialog.showErrorBox(title, String((err && err.message) || err));
+  if (app.isReady()) show();
+  else app.whenReady().then(show);
+}
 
 // Start the local network server (used when this PC acts as "Admin" / database).
 // It's harmless to always run this — a Kassa-only PC simply won't use it.
 try {
   const { startServer } = require(path.join(__dirname, "../server/index.js"));
-  startServer(app.getPath("userData"), 4000);
+  startServer(app.getPath("userData"), 4000, (err) => {
+    reportFatalStartupError(
+      "Server başlaya bilmədi (port 4000)",
+      `${err.code === "EADDRINUSE" ? "4000 portu artıq başqa proqram tərəfindən istifadə olunur." : err.message}\n\nBu kompüteri yenidən başladıb bir də sınayın. Problem davam etsə, bu mesajı olduğu kimi göstərin.`
+    );
+  });
 } catch (err) {
-  console.error("Server could not start:", err);
+  reportFatalStartupError("Server başlaya bilmədi", err);
 }
 
 // Daily off-disk backup: copies the live data file to a folder the user
@@ -40,6 +69,32 @@ function runDailyBackup() {
 setInterval(runDailyBackup, 24 * 60 * 60 * 1000);
 app.whenReady().then(runDailyBackup);
 
+// Lets the Parametrlər screen list real Windows printers, so "Çek printeri"
+// can be an actual selectable device instead of a free-text label.
+ipcMain.handle("list-printers", async (event) => {
+  try {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const printers = await win.webContents.getPrintersAsync();
+    return { ok: true, printers: printers.map((p) => ({ name: p.name, isDefault: !!p.isDefault })) };
+  } catch (err) {
+    return { ok: false, error: String(err), printers: [] };
+  }
+});
+
+// Prints whatever is currently marked as the print area (see index.css'
+// `.print-area` rule) straight to the chosen (or default) printer, with no
+// dialog — this is what makes "Avtomatik çek" actually automatic instead of
+// just a UI toggle that did nothing.
+ipcMain.handle("print-receipt", async (event, deviceName) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return new Promise((resolve) => {
+    win.webContents.print(
+      { silent: true, printBackground: true, deviceName: deviceName || undefined },
+      (success, reason) => resolve({ ok: success, error: success ? null : reason })
+    );
+  });
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1400,
@@ -47,8 +102,18 @@ function createWindow() {
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "preload.cjs"),
     },
+  });
+
+  // Blank/white window with nothing on it (a known failure mode on old
+  // Windows/GPU combos) otherwise leaves zero trace of what went wrong —
+  // catch it here so the log/error dialog actually says something useful.
+  win.webContents.on("did-fail-load", (event, errorCode, errorDescription) => {
+    reportFatalStartupError("Səhifə yüklənmədi", `${errorDescription} (kod: ${errorCode})`);
+  });
+  win.webContents.on("render-process-gone", (event, details) => {
+    reportFatalStartupError("Tətbiq gözlənilmədən bağlandı", `reason: ${details.reason}`);
   });
 
   if (isDev) {

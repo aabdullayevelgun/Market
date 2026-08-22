@@ -307,7 +307,7 @@ function MarketProvider({ children, serverUrl, token = "" }) {
 function useDeviceRole() {
   const [role, setRoleState] = useState(() => localStorage.getItem("zehra_role") || "");
   const [serverUrl, setServerUrlState] = useState(
-    () => localStorage.getItem("zehra_server_url") || "http://localhost:4000"
+    () => localStorage.getItem("zehra_server_url") || "http://127.0.0.1:4000"
   );
   const [token, setTokenState] = useState(() => localStorage.getItem("zehra_token") || "");
   const setRole = (r, url, tok) => {
@@ -339,7 +339,7 @@ function RoleSetup({ onDone }) {
   const chooseAdmin = async () => {
     setStep("admin-ip");
     try {
-      const res = await fetch("http://localhost:4000/api/network-info");
+      const res = await fetch("http://127.0.0.1:4000/api/network-info");
       const data = await res.json();
       setAdminIp(data.ip || null);
       setAdminToken(data.token || null);
@@ -424,7 +424,7 @@ function RoleSetup({ onDone }) {
               </div>
             )}
             <button
-              onClick={() => onDone("admin", "http://localhost:4000", adminToken)}
+              onClick={() => onDone("admin", "http://127.0.0.1:4000", adminToken)}
               className="w-full bg-[#16a34a] hover:bg-[#15803d] text-white rounded-xl py-3 font-bold text-sm"
             >
               Davam et
@@ -597,6 +597,8 @@ function KassaView() {
     const q = query.toLowerCase();
     return products.filter((p) => p.ad.toLowerCase().includes(q) || p.kod.includes(q)).slice(0, 12);
   }, [query, products]);
+
+  const barkodsuzMehsullar = useMemo(() => products.filter((p) => p.barkodsuz), [products]);
 
   const addToCart = (product, weightKg) => {
     setCart((c) => {
@@ -798,6 +800,11 @@ function KassaView() {
     setViewSale(sale);
     setPayOpen(false);
     setReceiptOpen(true);
+    if (settings.avtomatikCek) {
+      // Let the hidden print-area DOM commit first, then send it straight
+      // to the printer with no dialog — this is the actual "avtomatik çek".
+      setTimeout(() => printReceipt(sale, settings), 150);
+    }
     setCart([]);
     setLastAdded(null);
     setDiscountPct("0");
@@ -879,62 +886,10 @@ function KassaView() {
         </div>
       )}
 
-      <div className="p-6 grid grid-cols-[1fr_360px] gap-5" style={{ minHeight: "calc(100vh - 68px)" }}>
-        {/* Left: product search / browse area */}
-        <div className="bg-white rounded-2xl border border-gray-200 p-6">
-          {query.trim() && matches.length > 0 ? (
-            <div className="grid grid-cols-3 gap-3">
-              {matches.map((p) => (
-                <button
-                  key={p.kod}
-                  onClick={() => {
-                    addToCart(p);
-                    setQuery("");
-                  }}
-                  className="text-left border border-gray-200 rounded-2xl p-4 hover:border-[#16a34a] hover:shadow-sm transition"
-                >
-                  <div className="w-11 h-11 rounded-xl bg-green-50 flex items-center justify-center mb-3">
-                    <Package size={20} className="text-[#16a34a]" />
-                  </div>
-                  <div className="font-semibold text-sm mb-1">{p.ad}</div>
-                  <div className="text-xs text-gray-400 mb-1">{p.kat}</div>
-                  <div className="font-bold text-[#16a34a] text-sm">
-                    {fmt(p.satish)} AZN{p.novu === "çəki" ? " / kq" : ""}
-                  </div>
-                </button>
-              ))}
-            </div>
-          ) : lastAdded ? (
-            <div className="h-full min-h-[420px] flex flex-col items-center justify-center text-center">
-              <div className="w-20 h-20 rounded-full bg-green-50 flex items-center justify-center mb-5">
-                <Check size={40} className="text-[#16a34a]" strokeWidth={2.5} />
-              </div>
-              <div className="text-xs font-semibold text-gray-400 tracking-wide mb-2">SON ƏLAVƏ OLUNAN</div>
-              <div className="font-black text-3xl mb-2 max-w-xl">{lastAdded.ad}</div>
-              {lastAdded.kat && <div className="text-sm text-gray-400 mb-4">{lastAdded.kat}</div>}
-              <div className="font-black text-5xl text-[#16a34a] mb-2">
-                {fmt(lastAdded.satish)} <span className="text-2xl">AZN</span>
-                {lastAdded.novu === "çəki" && <span className="text-2xl text-gray-400"> / kq</span>}
-              </div>
-              <div className="text-sm text-gray-400">
-                {lastAdded.novu === "çəki" ? `${lastAdded.qty.toFixed(3)} kq əlavə olundu` : `${lastAdded.qty} ${lastAdded.vahid || "ədəd"} əlavə olundu`}
-                {lastAdded.endirim > 0 && <span className="text-red-500 font-semibold"> · -{lastAdded.endirim}% endirim</span>}
-              </div>
-            </div>
-          ) : (
-            <div className="h-full min-h-[420px] flex flex-col items-center justify-center text-center">
-              <ShoppingCart size={72} className="text-gray-200 mb-4" strokeWidth={1.2} />
-              <div className="text-gray-400 text-sm leading-relaxed">
-                Məhsul axtarmaq üçün yuxarıdakı axtarışdan istifadə edin<br />
-                və ya barkod oxudun
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Right: cart / Səbət */}
+      <div className="p-6 grid grid-cols-[1fr_320px] gap-5" style={{ minHeight: "calc(100vh - 68px)" }}>
+        {/* Left/center: the cart — now the big, primary area */}
         <div className="bg-white rounded-2xl border border-gray-200 flex flex-col">
-          <div className="px-5 py-4 flex items-center justify-between border-b border-gray-100">
+          <div className="px-6 py-4 flex items-center justify-between border-b border-gray-100">
             <div className="flex items-center gap-2">
               <span className="font-bold text-lg">Səbət</span>
               <span className="bg-[#16a34a] text-white text-xs font-bold rounded-full w-6 h-6 flex items-center justify-center">
@@ -946,15 +901,44 @@ function KassaView() {
             </button>
           </div>
 
-          <div className="flex-1 overflow-auto px-5 py-3 space-y-1">
+          {query.trim() && matches.length > 0 && (
+            <div className="border-b border-gray-100 px-6 py-4">
+              <div className="grid grid-cols-3 gap-3">
+                {matches.map((p) => (
+                  <button
+                    key={p.kod}
+                    onClick={() => {
+                      addToCart(p);
+                      setQuery("");
+                    }}
+                    className="text-left border border-gray-200 rounded-2xl p-4 hover:border-[#16a34a] hover:shadow-sm transition"
+                  >
+                    <div className="w-11 h-11 rounded-xl bg-green-50 flex items-center justify-center mb-3">
+                      <Package size={20} className="text-[#16a34a]" />
+                    </div>
+                    <div className="font-semibold text-sm mb-1">{p.ad}</div>
+                    <div className="text-xs text-gray-400 mb-1">{p.kat}</div>
+                    <div className="font-bold text-[#16a34a] text-sm">
+                      {fmt(p.satish)} AZN{p.novu === "çəki" ? " / kq" : ""}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex-1 overflow-auto px-6 py-3 space-y-1">
             {cart.length === 0 && (
-              <div className="h-full min-h-[220px] flex flex-col items-center justify-center text-center">
-                <ShoppingCart size={48} className="text-gray-200 mb-3" strokeWidth={1.2} />
-                <div className="text-gray-400 text-sm">Səbət boşdur</div>
+              <div className="h-full min-h-[300px] flex flex-col items-center justify-center text-center">
+                <ShoppingCart size={72} className="text-gray-200 mb-4" strokeWidth={1.2} />
+                <div className="text-gray-400 text-sm leading-relaxed">
+                  Səbət boşdur — sağdakı siyahıdan məhsul seçin,<br />
+                  barkod oxudun, ya da yuxarıdan axtarın
+                </div>
               </div>
             )}
             {cart.map((item) => (
-              <div key={item.kod} className="flex items-center justify-between gap-2 py-2.5 border-b border-gray-50 last:border-0">
+              <div key={item.kod} className="flex items-center justify-between gap-2 py-3 border-b border-gray-50 last:border-0">
                 <div className="min-w-0 flex-1">
                   <div className="text-sm font-medium truncate">{item.ad}</div>
                   <div className="text-xs text-gray-400">
@@ -965,29 +949,29 @@ function KassaView() {
                 <div className="flex items-center gap-1.5 shrink-0">
                   <button
                     onClick={() => changeQty(item.kod, -1)}
-                    className="w-6 h-6 rounded-md bg-gray-100 flex items-center justify-center hover:bg-gray-200"
+                    className="w-7 h-7 rounded-md bg-gray-100 flex items-center justify-center hover:bg-gray-200"
                   >
-                    <Minus size={11} />
+                    <Minus size={12} />
                   </button>
-                  <span className="w-12 text-center text-xs font-semibold">
+                  <span className="w-14 text-center text-xs font-semibold">
                     {item.novu === "çəki" ? `${item.miqdar.toFixed(3)}kq` : item.miqdar}
                   </span>
                   <button
                     onClick={() => changeQty(item.kod, 1)}
-                    className="w-6 h-6 rounded-md bg-gray-100 flex items-center justify-center hover:bg-gray-200"
+                    className="w-7 h-7 rounded-md bg-gray-100 flex items-center justify-center hover:bg-gray-200"
                   >
-                    <Plus size={11} />
+                    <Plus size={12} />
                   </button>
                 </div>
-                <div className="w-16 text-right text-sm font-bold text-[#16a34a] shrink-0">{fmt(lineTotal(item))}</div>
+                <div className="w-20 text-right text-sm font-bold text-[#16a34a] shrink-0">{fmt(lineTotal(item))}</div>
                 <button onClick={() => requestRemoveItem(item.kod)} className="text-gray-300 hover:text-red-500 shrink-0">
-                  <X size={15} />
+                  <X size={16} />
                 </button>
               </div>
             ))}
           </div>
 
-          <div className="px-5 py-4 border-t border-gray-100 space-y-2.5">
+          <div className="px-6 py-4 border-t border-gray-100 space-y-2.5">
             <div className="flex items-center justify-between text-sm">
               <span className="text-gray-500">Ara məbləğ</span>
               <span className="font-semibold">{fmt(subtotal)} AZN</span>
@@ -1020,6 +1004,38 @@ function KassaView() {
             >
               <ShoppingCart size={20} /> SATIŞ ET
             </button>
+          </div>
+        </div>
+
+        {/* Right: quick-add list — ONLY products marked "Barkodu yoxdur" in
+            Məhsullar (fresh bread, eggs, in-house goods with nothing to
+            scan). The cashier taps the name/price directly instead. */}
+        <div className="bg-white rounded-2xl border border-gray-200 flex flex-col">
+          <div className="px-4 py-4 border-b border-gray-100">
+            <span className="font-bold text-sm">Barkodsuz mallar</span>
+          </div>
+          <div className="flex-1 overflow-auto p-3 space-y-2">
+            {barkodsuzMehsullar.length === 0 && (
+              <div className="text-center text-gray-400 text-xs py-10 px-3 leading-relaxed">
+                Barkodsuz məhsul yoxdur.<br />
+                Məhsullar səhifəsində məhsulu redaktə edib "Barkodu yoxdur" seçin ki, burada görünsün.
+              </div>
+            )}
+            {barkodsuzMehsullar.map((p) => (
+              <button
+                key={p.kod}
+                onClick={() => addToCart(p)}
+                className="w-full text-left border border-gray-200 rounded-xl px-3 py-2.5 hover:border-[#16a34a] hover:bg-green-50/40 transition flex items-center justify-between gap-2"
+              >
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold truncate">{p.ad}</div>
+                  {p.kat && <div className="text-[11px] text-gray-400 truncate">{p.kat}</div>}
+                </div>
+                <div className="text-sm font-bold text-[#16a34a] shrink-0">
+                  {fmt(p.satish)}{p.novu === "çəki" ? "/kq" : ""}
+                </div>
+              </button>
+            ))}
           </div>
         </div>
       </div>
@@ -1171,78 +1187,114 @@ function KassaView() {
       {/* Receipt modal */}
       {receiptOpen && viewSale && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-xs p-6 font-mono text-xs">
-            <div className="text-center mb-3">
-              <div className="font-black text-sm">
-                <span className="text-[#2563eb]">ZƏHRA</span> <span className="text-[#eab308]">MARKET</span>
-              </div>
-              <div className="mt-1 text-[10px] text-gray-500 leading-relaxed">
-                {settings.magazaAdi}<br />
-                {settings.unvan && <>ÜNVAN: {settings.unvan}<br /></>}
-                {settings.telefon && <>Tel: {settings.telefon}<br /></>}
-                {settings.voen && <>VÖEN: {settings.voen}</>}
-                {settings.cekBasliqQeydi && (
-                  <>
-                    <br />
-                    {settings.cekBasliqQeydi}
-                  </>
-                )}
-              </div>
+          <div className="bg-white rounded-2xl w-full max-w-xs p-6">
+            <ReceiptContent sale={viewSale} settings={settings} />
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => setReceiptOpen(false)}
+                className="flex-1 border border-gray-200 text-gray-500 rounded-lg py-2 font-sans font-semibold text-sm"
+              >
+                Bağla
+              </button>
+              <button
+                onClick={() => printReceipt(viewSale, settings)}
+                className="flex-[2] bg-[#16a34a] text-white rounded-lg py-2 font-sans font-semibold text-sm"
+              >
+                Çek çap et
+              </button>
             </div>
-            <div className="border-t border-dashed border-gray-300 my-2" />
-            <div className="flex justify-between text-[11px]">
-              <span>ÇEK №: {viewSale.no}</span>
-              <span>{viewSale.tarix}</span>
-            </div>
-            <div className="text-[11px] mb-2">Kassir: {viewSale.kassir}</div>
-            <div className="border-t border-dashed border-gray-300 my-2" />
-            {viewSale.items.map((it, idx) => (
-              <div key={it.kod + idx} className="flex justify-between text-[11px] mb-1">
-                <span className="truncate mr-2">{it.ad}</span>
-                <span>{fmt(it.qiymet * it.miqdar * (1 - it.endirim / 100))}</span>
-              </div>
-            ))}
-            <div className="border-t border-dashed border-gray-300 my-2" />
-            <div className="flex justify-between font-bold text-sm">
-              <span>YEKUN:</span>
-              <span>{fmt(viewSale.meblegh)} AZN</span>
-            </div>
-            <div className="mt-2 text-[11px] space-y-0.5">
-              <div className="flex justify-between">
-                <span>ÖDƏNİŞ NÖVÜ:</span>
-                <span>{viewSale.odenish}</span>
-              </div>
-              {viewSale.odenish === "NƏĞD" && viewSale.received != null && (
-                <>
-                  <div className="flex justify-between">
-                    <span>ALINAN MƏBLƏĞ:</span>
-                    <span>{fmt(viewSale.received)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>GERİ QAYTARILAN:</span>
-                    <span>{fmt(viewSale.change)}</span>
-                  </div>
-                </>
-              )}
-            </div>
-            <div className="text-center mt-4 font-bold text-[12px]">
-              {(settings.cekTesekkurMesaji || "TƏŞƏKKÜRLƏR!\nXoş gəlmisiniz!").split("\n").map((line, i) => (
-                <div key={i} className={i === 0 ? "" : "font-normal text-[10px]"}>
-                  {line}
-                </div>
-              ))}
-            </div>
-            <button
-              onClick={() => setReceiptOpen(false)}
-              className="w-full mt-4 bg-[#16a34a] text-white rounded-lg py-2 font-sans font-semibold"
-            >
-              Bağla
-            </button>
           </div>
+        </div>
+      )}
+
+      {/* Hidden print-only copy of whatever receipt is currently open — this
+          is what actually reaches the printer (see printReceipt below), the
+          modal above is only what the cashier sees on screen. */}
+      {receiptOpen && viewSale && (
+        <div className="print-area hidden print:block">
+          <ReceiptContent sale={viewSale} settings={settings} />
         </div>
       )}
     </div>
   );
+}
+
+function ReceiptContent({ sale, settings }) {
+  return (
+    <div className="font-mono text-xs">
+      <div className="text-center mb-3">
+        <div className="font-black text-sm">
+          <span className="text-[#2563eb]">ZƏHRA</span> <span className="text-[#eab308]">MARKET</span>
+        </div>
+        <div className="mt-1 text-[10px] text-gray-500 leading-relaxed">
+          {settings.magazaAdi}<br />
+          {settings.unvan && <>ÜNVAN: {settings.unvan}<br /></>}
+          {settings.telefon && <>Tel: {settings.telefon}<br /></>}
+          {settings.voen && <>VÖEN: {settings.voen}</>}
+          {settings.cekBasliqQeydi && (
+            <>
+              <br />
+              {settings.cekBasliqQeydi}
+            </>
+          )}
+        </div>
+      </div>
+      <div className="border-t border-dashed border-gray-300 my-2" />
+      <div className="flex justify-between text-[11px]">
+        <span>ÇEK №: {sale.no}</span>
+        <span>{sale.tarix}</span>
+      </div>
+      <div className="text-[11px] mb-2">Kassir: {sale.kassir}</div>
+      <div className="border-t border-dashed border-gray-300 my-2" />
+      {sale.items.map((it, idx) => (
+        <div key={it.kod + idx} className="flex justify-between text-[11px] mb-1">
+          <span className="truncate mr-2">{it.ad}</span>
+          <span>{fmt(it.qiymet * it.miqdar * (1 - it.endirim / 100))}</span>
+        </div>
+      ))}
+      <div className="border-t border-dashed border-gray-300 my-2" />
+      <div className="flex justify-between font-bold text-sm">
+        <span>YEKUN:</span>
+        <span>{fmt(sale.meblegh)} AZN</span>
+      </div>
+      <div className="mt-2 text-[11px] space-y-0.5">
+        <div className="flex justify-between">
+          <span>ÖDƏNİŞ NÖVÜ:</span>
+          <span>{sale.odenish}</span>
+        </div>
+        {sale.odenish === "NƏĞD" && sale.received != null && (
+          <>
+            <div className="flex justify-between">
+              <span>ALINAN MƏBLƏĞ:</span>
+              <span>{fmt(sale.received)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>GERİ QAYTARILAN:</span>
+              <span>{fmt(sale.change)}</span>
+            </div>
+          </>
+        )}
+      </div>
+      <div className="text-center mt-4 font-bold text-[12px]">
+        {(settings.cekTesekkurMesaji || "TƏŞƏKKÜRLƏR!\nXoş gəlmisiniz!").split("\n").map((line, i) => (
+          <div key={i} className={i === 0 ? "" : "font-normal text-[10px]"}>
+            {line}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Prints the receipt straight to the configured (or default) Windows
+// printer with no dialog — falls back to the normal browser print dialog
+// when not running inside Electron (e.g. previewing in a plain browser).
+function printReceipt(sale, settings) {
+  if (window.electronAPI && window.electronAPI.printReceipt) {
+    window.electronAPI.printReceipt(settings.printerName || undefined);
+  } else {
+    window.print();
+  }
 }
 
 /* ---------------------------------------------------------------- */
@@ -1401,7 +1453,7 @@ function IcmalPage({ onNavigate }) {
   );
 }
 
-const emptyProductForm = { kod: "", ad: "", kat: "", alish: "", satish: "", endirim: "0", stok: "", minimum: "10", novu: "eded", vahid: "ədəd", tereziKodu: "" };
+const emptyProductForm = { kod: "", ad: "", kat: "", alish: "", satish: "", endirim: "0", stok: "", minimum: "10", novu: "eded", vahid: "ədəd", tereziKodu: "", barkodsuz: false };
 
 function MehsullarPage() {
   const { products, addProduct, updateProduct, deleteProduct, importProducts } = useMarket();
@@ -1428,6 +1480,7 @@ function MehsullarPage() {
       alish: String(p.alish), satish: String(p.satish),
       endirim: String(p.endirim), stok: String(p.stok), minimum: String(p.minimum),
       novu: p.novu || "eded", vahid: p.vahid || "ədəd", tereziKodu: p.tereziKodu || "",
+      barkodsuz: !!p.barkodsuz,
     });
     setModalOpen(true);
   };
@@ -1446,6 +1499,7 @@ function MehsullarPage() {
       novu: form.novu === "çəki" ? "çəki" : "eded",
       vahid: form.novu === "çəki" ? "kq" : form.vahid || "ədəd",
       tereziKodu: form.tereziKodu.trim(),
+      barkodsuz: !!form.barkodsuz,
     };
     if (editing) updateProduct(editing.kod, payload);
     else addProduct(payload);
@@ -1730,6 +1784,18 @@ function MehsullarPage() {
                 </div>
               )}
             </div>
+            <label className="flex items-start gap-2.5 pt-1 border-t border-gray-100 mt-1 pt-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.barkodsuz}
+                onChange={(e) => setForm({ ...form, barkodsuz: e.target.checked })}
+                className="mt-0.5"
+              />
+              <span className="text-xs text-gray-600">
+                <span className="font-semibold">Barkodu yoxdur</span> — bu məhsul (çörək, yumurta və s.) Kassa ekranında
+                sağdakı "kliklə əlavə et" siyahısında görünsün
+              </span>
+            </label>
             <div className="flex gap-2 pt-2">
               <button onClick={() => setModalOpen(false)} className="flex-1 py-2.5 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
                 Ləğv et
@@ -2089,7 +2155,7 @@ function HesabatlarPage() {
       </div>
 
       {/* Print-only report — invisible on screen, only rendered when window.print() runs */}
-      <div id="zehra-print-area" className="hidden print:block p-8 font-sans text-black">
+      <div className="print-area hidden print:block p-8 font-sans text-black">
         <div className="text-center mb-6">
           <div className="font-black text-2xl">{settings.magazaAdi || "ZƏHRA MARKET"}</div>
           <div className="text-sm text-gray-600 mt-1">{settings.unvan}</div>
@@ -2659,8 +2725,17 @@ function ParametrlerPage({ onResetRole }) {
   const { settings, setSettings } = useMarket();
   const [draft, setDraft] = useState(settings);
   const [saved, setSaved] = useState(false);
+  const [printers, setPrinters] = useState([]);
   const role = localStorage.getItem("zehra_role") || "admin";
-  const serverUrl = localStorage.getItem("zehra_server_url") || "http://localhost:4000";
+  const serverUrl = localStorage.getItem("zehra_server_url") || "http://127.0.0.1:4000";
+  const isElectron = typeof window !== "undefined" && !!window.electronAPI;
+
+  React.useEffect(() => {
+    if (!isElectron) return;
+    window.electronAPI.listPrinters().then((res) => {
+      if (res.ok) setPrinters(res.printers);
+    });
+  }, []);
 
   const Toggle = ({ on, onClick }) => (
     <button
@@ -2708,7 +2783,30 @@ function ParametrlerPage({ onResetRole }) {
           <FormField label="Telefon" value={draft.telefon} onChange={(e) => setDraft({ ...draft, telefon: e.target.value })} />
           <FormField label="Ünvan" value={draft.unvan} onChange={(e) => setDraft({ ...draft, unvan: e.target.value })} />
           <FormField label="Valyuta" value={draft.valyuta} onChange={(e) => setDraft({ ...draft, valyuta: e.target.value })} />
-          <FormField label="Çek printeri" value={draft.printer} onChange={(e) => setDraft({ ...draft, printer: e.target.value })} />
+          <div>
+            <div className="text-xs text-gray-500 mb-1">Çek printeri</div>
+            {isElectron && printers.length > 0 ? (
+              <select
+                value={draft.printerName || ""}
+                onChange={(e) => setDraft({ ...draft, printerName: e.target.value })}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-green-400"
+              >
+                <option value="">Sistemin default printeri</option>
+                {printers.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name}{p.isDefault ? " (default)" : ""}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={draft.printer}
+                onChange={(e) => setDraft({ ...draft, printer: e.target.value })}
+                placeholder={isElectron ? "Printer tapılmadı" : "Yalnız quraşdırılmış tətbiqdə seçilə bilər"}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-green-400"
+              />
+            )}
+          </div>
         </div>
       </div>
       <div className="bg-white rounded-2xl border border-gray-200 p-5 mb-4">
@@ -2794,7 +2892,7 @@ function AdminView({ onResetRole }) {
   const Page = PAGES[active];
 
   React.useEffect(() => {
-    fetch("http://localhost:4000/api/network-info")
+    fetch("http://127.0.0.1:4000/api/network-info")
       .then((r) => r.json())
       .then((d) => {
         setIp(d.ip || null);
