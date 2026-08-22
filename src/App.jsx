@@ -579,6 +579,8 @@ function KassaView() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [method, setMethod] = useState("nagd");
   const [received, setReceived] = useState("0.00");
+  const [cashPart, setCashPart] = useState("0.00");
+  const [cardPart, setCardPart] = useState("0.00");
   const [lastSale, setLastSale] = useState(null);
   const [viewSale, setViewSale] = useState(null);
   const [scanMsg, setScanMsg] = useState(null);
@@ -591,6 +593,8 @@ function KassaView() {
   const unitCount = cart.reduce((s, i) => s + i.miqdar, 0);
   const change = Math.max(0, (parseFloat(received) || 0) - total);
   const insufficientCash = method === "nagd" && (parseFloat(received) || 0) < total;
+  const mixedSum = (parseFloat(cashPart) || 0) + (parseFloat(cardPart) || 0);
+  const mixedMismatch = method === "qarisiq" && Math.abs(mixedSum - total) > 0.001;
 
   const matches = useMemo(() => {
     if (!query.trim()) return [];
@@ -782,29 +786,33 @@ function KassaView() {
 
   const confirmSale = () => {
     if (method === "nagd" && (parseFloat(received) || 0) < total) return;
+    if (method === "qarisiq" && mixedMismatch) return;
+    const odenishLabel = method === "nagd" ? "NƏĞD" : method === "kart" ? "KART" : "QARIŞIQ";
     const sale = {
       no: generateSaleNo(sales),
       tarix: nowStr(),
       kassir: "Kassir 01",
       say: cart.length,
       meblegh: total,
-      odenish: method === "nagd" ? "NƏĞD" : "KART",
+      odenish: odenishLabel,
       status: "Tamamlandı",
       items: cart,
       received: method === "nagd" ? parseFloat(received) || total : total,
       change: method === "nagd" ? change : 0,
       method,
+      // Only meaningful for a split (qarışıq) payment — how much of the
+      // total was paid in cash vs by card, shown as a breakdown on the receipt.
+      cashPart: method === "qarisiq" ? parseFloat(cashPart) || 0 : null,
+      cardPart: method === "qarisiq" ? parseFloat(cardPart) || 0 : null,
     };
     addSale(sale);
     setLastSale(sale);
     setViewSale(sale);
     setPayOpen(false);
+    // No auto-print here — the receipt modal has its own "Çeki çap et" /
+    // "Bağla" choice, so nothing goes to the printer unless the cashier
+    // explicitly asks for it.
     setReceiptOpen(true);
-    if (settings.avtomatikCek) {
-      // Let the hidden print-area DOM commit first, then send it straight
-      // to the printer with no dialog — this is the actual "avtomatik çek".
-      setTimeout(() => printReceipt(sale, settings), 150);
-    }
     setCart([]);
     setLastAdded(null);
     setDiscountPct("0");
@@ -814,6 +822,8 @@ function KassaView() {
     if (cart.length === 0) return;
     setMethod(m);
     setReceived(total.toFixed(2));
+    setCashPart(total.toFixed(2));
+    setCardPart("0.00");
     setPayOpen(true);
   };
 
@@ -1094,26 +1104,36 @@ function KassaView() {
                 <div className="text-xs text-gray-500 font-medium">YEKUN MƏBLƏĞ</div>
                 <div className="text-3xl font-black text-[#15803d]">{fmt(total)} AZN</div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-2">
                 <button
                   onClick={() => setMethod("nagd")}
-                  className={`rounded-xl border-2 py-4 flex flex-col items-center gap-2 ${
+                  className={`rounded-xl border-2 py-3 flex flex-col items-center gap-1.5 ${
                     method === "nagd" ? "border-green-500 bg-green-50" : "border-gray-200"
                   }`}
                 >
-                  <Banknote size={26} className="text-green-600" />
-                  <span className="font-bold text-green-700 text-sm">NƏĞD</span>
+                  <Banknote size={22} className="text-green-600" />
+                  <span className="font-bold text-green-700 text-xs">NƏĞD</span>
                   <span className="text-[10px] text-gray-400">(F8)</span>
                 </button>
                 <button
                   onClick={() => setMethod("kart")}
-                  className={`rounded-xl border-2 py-4 flex flex-col items-center gap-2 ${
+                  className={`rounded-xl border-2 py-3 flex flex-col items-center gap-1.5 ${
                     method === "kart" ? "border-blue-500 bg-blue-50" : "border-gray-200"
                   }`}
                 >
-                  <CreditCard size={26} className="text-blue-600" />
-                  <span className="font-bold text-blue-700 text-sm">KART</span>
+                  <CreditCard size={22} className="text-blue-600" />
+                  <span className="font-bold text-blue-700 text-xs">KART</span>
                   <span className="text-[10px] text-gray-400">(F9)</span>
+                </button>
+                <button
+                  onClick={() => setMethod("qarisiq")}
+                  className={`rounded-xl border-2 py-3 flex flex-col items-center gap-1.5 ${
+                    method === "qarisiq" ? "border-purple-500 bg-purple-50" : "border-gray-200"
+                  }`}
+                >
+                  <Wallet size={22} className="text-purple-600" />
+                  <span className="font-bold text-purple-700 text-xs">QARIŞIQ</span>
+                  <span className="text-[10px] text-gray-400">nəğd+kart</span>
                 </button>
               </div>
               {method === "nagd" && (
@@ -1140,6 +1160,35 @@ function KassaView() {
                   )}
                 </div>
               )}
+              {method === "qarisiq" && (
+                <div className="bg-gray-50 rounded-xl p-4 space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-xs text-gray-500 mb-1">NƏĞD HİSSƏ</div>
+                      <input
+                        value={cashPart}
+                        onChange={(e) => setCashPart(e.target.value)}
+                        className="w-full text-lg font-bold border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-green-400"
+                      />
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-500 mb-1">KART HİSSƏ</div>
+                      <input
+                        value={cardPart}
+                        onChange={(e) => setCardPart(e.target.value)}
+                        className="w-full text-lg font-bold border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-400"
+                      />
+                    </div>
+                  </div>
+                  {mixedMismatch ? (
+                    <div className="text-red-500 text-xs font-semibold">
+                      Nəğd + Kart cəmi ({fmt(mixedSum)} AZN) yekun məbləğə ({fmt(total)} AZN) bərabər olmalıdır.
+                    </div>
+                  ) : (
+                    <div className="text-green-600 text-xs font-semibold">✓ Cəm düzgündür</div>
+                  )}
+                </div>
+              )}
               <div className="flex gap-2">
                 <button
                   onClick={() => setPayOpen(false)}
@@ -1149,7 +1198,7 @@ function KassaView() {
                 </button>
                 <button
                   onClick={confirmSale}
-                  disabled={insufficientCash}
+                  disabled={insufficientCash || mixedMismatch}
                   className="flex-[2] bg-[#15803d] hover:bg-[#166534] disabled:opacity-40 disabled:hover:bg-[#15803d] text-white rounded-xl py-3 font-bold flex items-center justify-center gap-2"
                 >
                   <Check size={18} /> TƏSDİQLƏ
@@ -1271,6 +1320,18 @@ function ReceiptContent({ sale, settings }) {
             <div className="flex justify-between">
               <span>GERİ QAYTARILAN:</span>
               <span>{fmt(sale.change)}</span>
+            </div>
+          </>
+        )}
+        {sale.odenish === "QARIŞIQ" && (
+          <>
+            <div className="flex justify-between">
+              <span>— NƏĞD:</span>
+              <span>{fmt(sale.cashPart)} AZN</span>
+            </div>
+            <div className="flex justify-between">
+              <span>— KART:</span>
+              <span>{fmt(sale.cardPart)} AZN</span>
             </div>
           </>
         )}
@@ -1486,9 +1547,13 @@ function MehsullarPage() {
   };
 
   const save = () => {
-    if (!form.kod.trim() || !form.ad.trim()) return;
+    // "Barkodu yoxdur" items (fresh bread, eggs...) genuinely have no real
+    // barcode to type in — auto-generate an internal code instead of
+    // silently refusing to save when the Barkod field is left empty.
+    const kod = form.kod.trim() || (form.barkodsuz ? `NOBARCODE-${Date.now()}` : "");
+    if (!kod || !form.ad.trim()) return;
     const payload = {
-      kod: form.kod.trim(),
+      kod,
       ad: form.ad.trim(),
       kat: form.kat.trim() || "Digər",
       alish: parseFloat(form.alish) || 0,
@@ -1733,7 +1798,12 @@ function MehsullarPage() {
       {modalOpen && (
         <Modal title={editing ? "Məhsulu düzəlt" : "Yeni məhsul əlavə et"} onClose={() => setModalOpen(false)}>
           <div className="space-y-3">
-            <FormField label="Barkod" value={form.kod} onChange={(e) => setForm({ ...form, kod: e.target.value })} />
+            <FormField
+              label="Barkod"
+              value={form.kod}
+              onChange={(e) => setForm({ ...form, kod: e.target.value })}
+              placeholder={form.barkodsuz ? "Boş buraxsanız avtomatik yaradılacaq" : ""}
+            />
             <FormField label="Məhsul adı" value={form.ad} onChange={(e) => setForm({ ...form, ad: e.target.value })} />
             <FormField label="Kateqoriya" value={form.kat} onChange={(e) => setForm({ ...form, kat: e.target.value })} />
             <div className="grid grid-cols-2 gap-3">
@@ -1959,6 +2029,7 @@ function SatislarPage() {
           <option value="Hamısı">ÖDƏNİŞ: HAMISI</option>
           <option value="NƏĞD">NƏĞD</option>
           <option value="KART">KART</option>
+          <option value="QARIŞIQ">QARIŞIQ</option>
         </select>
         {hasFilter && (
           <button onClick={resetFilters} className="text-xs font-semibold text-red-500 hover:text-red-600 px-2">
@@ -2039,8 +2110,12 @@ function HesabatlarPage() {
 
   const bugunSales = sales.filter((s) => s.tarix && s.tarix.startsWith(nowDateStr()));
   const dovriyye = bugunSales.reduce((sum, s) => sum + (s.meblegh || 0), 0);
-  const neghd = bugunSales.filter((s) => s.odenish === "NƏĞD").reduce((sum, s) => sum + (s.meblegh || 0), 0);
-  const kart = bugunSales.filter((s) => s.odenish === "KART").reduce((sum, s) => sum + (s.meblegh || 0), 0);
+  const neghd =
+    bugunSales.filter((s) => s.odenish === "NƏĞD").reduce((sum, s) => sum + (s.meblegh || 0), 0) +
+    bugunSales.filter((s) => s.odenish === "QARIŞIQ").reduce((sum, s) => sum + (s.cashPart || 0), 0);
+  const kart =
+    bugunSales.filter((s) => s.odenish === "KART").reduce((sum, s) => sum + (s.meblegh || 0), 0) +
+    bugunSales.filter((s) => s.odenish === "QARIŞIQ").reduce((sum, s) => sum + (s.cardPart || 0), 0);
   const neghdPct = dovriyye > 0 ? (neghd / dovriyye) * 100 : 0;
   const kartPct = dovriyye > 0 ? (kart / dovriyye) * 100 : 0;
   const menfeet = bugunSales.reduce((sum, s) => {

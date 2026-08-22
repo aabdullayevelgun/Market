@@ -20,4 +20,11 @@
     left: 0;
     width: 100%;
   }
+  /* Thermal/receipt printers tend to print regular-weight text very faint —
+     force everything bold on paper so it's actually readable, regardless of
+     how light it looks on screen. */
+  .print-area,
+  .print-area * {
+    font-weight: 700 !important;
+  }
 }
