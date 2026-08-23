@@ -247,6 +247,37 @@ function startServer(userDataDir, port = 4000, onError) {
     res.json(data);
   });
 
+  // Reverses a completed sale: gives every line item's quantity back to
+  // stock and marks the receipt as returned, so a customer bringing
+  // something back doesn't need the cashier to re-do the stock math by hand
+  // via "Mal gəldi". Runs from the Kassa screen itself (no admin gate),
+  // same as creating the sale did.
+  app.post("/api/sales/return", (req, res) => {
+    const data = loadData(dataFile);
+    const { no } = req.body || {};
+    const sale = data.sales.find((s) => s.no === no);
+    if (!sale) return res.status(404).json({ error: "Çek tapılmadı." });
+    if (sale.status === "İadə edilib") return res.status(400).json({ error: "Bu çek artıq geri qaytarılıb." });
+    sale.status = "İadə edilib";
+    (sale.items || []).forEach((item) => {
+      const product = data.products.find((p) => p.kod === item.kod);
+      if (!product) return;
+      product.stok = (product.stok || 0) + item.miqdar;
+      data.stockMovements.unshift({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        tarix: nowStr(),
+        kod: product.kod,
+        ad: product.ad,
+        tip: "Giriş",
+        miqdar: item.miqdar,
+        sebeb: `Qaytarma (çek ${no})`,
+        qaliq: product.stok,
+      });
+    });
+    saveData(dataFile, data);
+    res.json(data);
+  });
+
   // Stock-in ("Mal gəldi", delta > 0) and stock-out / write-off ("Stokdan
   // çıxar", delta < 0 — reason required) both go through here instead of the
   // product PUT route, so every change to the total is recorded as its own

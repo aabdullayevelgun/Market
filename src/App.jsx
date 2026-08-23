@@ -114,6 +114,11 @@ const CHART_DATA = [
 ];
 
 const fmt = (n) => (n || 0).toLocaleString("az-AZ", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Rounds a money value to the nearest qəpik. Chained float multiplication/
+// subtraction (price × qty × discount, summed and subtracted across a cart)
+// routinely lands a fraction of a qəpik off exact, so anywhere a total gets
+// compared against a typed amount, both sides need to go through this first.
+const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 // Fixed low-stock threshold — not configurable per product. Below this,
 // items are flagged/sorted to the top everywhere stock status is shown.
@@ -317,13 +322,20 @@ function MarketProvider({ children, serverUrl, token = "" }) {
   const restoreBackup = (data) => call("POST", "/api/restore", data);
   const importProducts = (list) => call("POST", "/api/products/import", { products: list });
   const resetSales = () => call("POST", "/api/sales/reset");
+  // Gives every line item's quantity back to stock and marks the receipt
+  // returned — for a returned pending (not-yet-synced) sale there's nothing
+  // on the server to reverse yet, so that case is rejected up front.
+  const returnSale = (no) => {
+    if (pendingRef.current.some((s) => s.no === no)) return Promise.resolve(false);
+    return call("POST", "/api/sales/return", { no });
+  };
 
   const value = {
     ...state,
     sales: [...pendingSales.map((s) => ({ ...s, _pending: true })), ...state.sales],
     pendingCount: pendingSales.length,
     connected, loading,
-    addProduct, updateProduct, deleteProduct, adjustStock, adjustStockBy,
+    addProduct, updateProduct, deleteProduct, adjustStock, adjustStockBy, returnSale,
     addSupplier, updateSupplier, deleteSupplier, addEmployee, deleteEmployee, addSale, setSettings, restoreBackup,
     importProducts, resetSales, setAdminPw,
   };
@@ -603,7 +615,18 @@ function FormField({ label, ...props }) {
 
 function KassaView({ role }) {
   const canDiscount = role !== "kassa";
-  const { products, sales, addSale, settings } = useMarket();
+  const { products, sales, addSale, returnSale, settings } = useMarket();
+  const [returningNo, setReturningNo] = useState(null);
+  const [returnMsg, setReturnMsg] = useState(null);
+
+  const handleReturn = async (sale) => {
+    if (!window.confirm(`Çek ${sale.no} (${fmt(sale.meblegh)} AZN) geri qaytarılsın? Mallar stoka əlavə olunacaq.`)) return;
+    setReturningNo(sale.no);
+    const ok = await returnSale(sale.no);
+    setReturningNo(null);
+    setReturnMsg({ isError: !ok, text: ok ? `Çek ${sale.no} geri qaytarıldı.` : "Geri qaytarma alınmadı — serverlə əlaqəni yoxlayın." });
+    setTimeout(() => setReturnMsg(null), 3500);
+  };
   // A large imported sales history (tens of thousands of receipts) would
   // freeze this modal if rendered in full — only the most recent ones matter
   // here, newest first; not-yet-synced sales are prepended by useMarket().
@@ -636,10 +659,16 @@ function KassaView({ role }) {
   const lineTotal = (item) => item.qiymet * item.miqdar * (1 - item.endirim / 100);
   const subtotal = useMemo(() => cart.reduce((s, i) => s + lineTotal(i), 0), [cart]);
   const discountAmt = subtotal * ((parseFloat(discountPct) || 0) / 100);
-  const total = Math.max(0, subtotal - discountAmt);
+  // Rounded to the qəpik (cent) before anything compares against it — chained
+  // float math (price × qty × discount, summed across a cart) routinely lands
+  // a fraction of a qəpik off exact (e.g. 1.5200000000000002), which made
+  // "1.52" typed for a 1.52 total register as insufficient until the cashier
+  // overpaid by a qəpik to clear the invisible remainder.
+  const total = round2(Math.max(0, subtotal - discountAmt));
   const unitCount = cart.reduce((s, i) => s + i.miqdar, 0);
-  const change = Math.max(0, (parseFloat(received) || 0) - total);
-  const insufficientCash = method === "nagd" && (parseFloat(received) || 0) < total;
+  const receivedNum = round2(parseFloat(received) || 0);
+  const change = round2(Math.max(0, receivedNum - total));
+  const insufficientCash = method === "nagd" && receivedNum < total;
   // The card amount is what the cashier actually enters; the cash portion
   // is always whatever's left of the total, never typed in by hand.
   const mixedCardPart = parseFloat(cardPart) || 0;
@@ -1299,22 +1328,39 @@ function KassaView({ role }) {
       {/* Son çeklər (sales history) modal */}
       {historyOpen && (
         <Modal title="Son çeklər" onClose={() => setHistoryOpen(false)} widthClass="max-w-lg">
+          {returnMsg && (
+            <div className={`rounded-xl px-3 py-2 text-xs font-semibold mb-2 ${returnMsg.isError ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}>
+              {returnMsg.text}
+            </div>
+          )}
           <div className="space-y-2 -mx-1">
             {recentSales.map((s) => (
-              <button
+              <div
                 key={s.no}
-                onClick={() => openFromHistory(s)}
-                className="w-full flex items-center justify-between px-3 py-3 rounded-xl hover:bg-gray-50 border border-gray-100 text-left"
+                className="w-full flex items-center justify-between px-3 py-3 rounded-xl hover:bg-gray-50 border border-gray-100"
               >
-                <div>
+                <button onClick={() => openFromHistory(s)} className="text-left flex-1">
                   <div className="font-semibold text-sm">{s.no}</div>
                   <div className="text-xs text-gray-400">{s.tarix} · {s.kassir}</div>
-                </div>
-                <div className="text-right">
+                </button>
+                <div className="text-right mr-3">
                   <div className="font-bold text-sm">{fmt(s.meblegh)} AZN</div>
                   <div className="text-xs text-gray-400">{s.odenish}</div>
                 </div>
-              </button>
+                {s.status === "İadə edilib" ? (
+                  <span className="text-xs font-semibold text-red-500 whitespace-nowrap">İadə edilib</span>
+                ) : s._pending ? (
+                  <span className="text-xs text-gray-300 whitespace-nowrap">—</span>
+                ) : (
+                  <button
+                    onClick={() => handleReturn(s)}
+                    disabled={returningNo === s.no}
+                    className="text-xs font-semibold text-red-500 hover:text-red-600 disabled:opacity-40 whitespace-nowrap border border-red-200 rounded-lg px-2.5 py-1.5"
+                  >
+                    {returningNo === s.no ? "..." : "İadə et"}
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         </Modal>
@@ -1594,6 +1640,7 @@ function StatusPill({ status }) {
     Aktiv: "bg-green-50 text-green-600",
     Tamamlandı: "bg-green-50 text-green-600",
     "Ləğv edilib": "bg-red-50 text-red-500",
+    "İadə edilib": "bg-red-50 text-red-500",
     "Sifariş ver": "bg-amber-50 text-amber-600",
     Təcili: "bg-red-50 text-red-500",
     "Borc var": "bg-red-50 text-red-500",
