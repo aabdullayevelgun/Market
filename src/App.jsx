@@ -216,9 +216,38 @@ const useMarket = () => useContext(MarketContext);
 const emptyState = { products: [], sales: [], employees: [], suppliers: [], settings: INITIAL_SETTINGS };
 
 const PENDING_SALES_KEY = "zehra_pending_sales";
+// Everything EXCEPT sales history — a full year of receipts can be many MB
+// and isn't needed to ring up a sale, while the product catalog (a few MB)
+// comfortably fits localStorage's ~10MB ceiling. Written on every successful
+// sync, so a Kassa PC that boots up before the Admin PC is even on for the
+// day still has this morning's — or worst case, yesterday's — prices and
+// stock to sell against, instead of an empty "Nəticə tapılmadı" catalog
+// until the two computers happen to be on at the same time.
+const CATALOG_CACHE_KEY = "zehra_catalog_cache";
+
+function loadCachedCatalog() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(CATALOG_CACHE_KEY) || "null");
+    if (!cached) return emptyState;
+    return { ...emptyState, ...cached, sales: [] };
+  } catch {
+    return emptyState;
+  }
+}
+
+function saveCachedCatalog(data) {
+  try {
+    const { products, employees, suppliers, settings } = data;
+    localStorage.setItem(CATALOG_CACHE_KEY, JSON.stringify({ products, employees, suppliers, settings }));
+  } catch (err) {
+    // Quota exceeded or storage disabled — offline catalog just won't be
+    // available next cold boot; the live app keeps working either way.
+    console.error("Catalog cache could not be saved:", err);
+  }
+}
 
 function MarketProvider({ children, serverUrl, token = "" }) {
-  const [state, setState] = useState(emptyState);
+  const [state, setState] = useState(loadCachedCatalog);
   const [connected, setConnected] = useState(true);
   const [loading, setLoading] = useState(true);
   const [pendingSales, setPendingSales] = useState(() => {
@@ -266,7 +295,9 @@ function MarketProvider({ children, serverUrl, token = "" }) {
       setConnected(true);
       if (text !== lastRawRef.current) {
         lastRawRef.current = text;
-        setState(JSON.parse(text));
+        const parsed = JSON.parse(text);
+        setState(parsed);
+        saveCachedCatalog(parsed);
       }
     } catch (err) {
       setConnected(false);
@@ -292,6 +323,7 @@ function MarketProvider({ children, serverUrl, token = "" }) {
       const data = await res.json();
       setState(data);
       lastRawRef.current = JSON.stringify(data);
+      saveCachedCatalog(data);
       setConnected(true);
       return true;
     } catch (err) {
