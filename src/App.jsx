@@ -2476,13 +2476,21 @@ const CIXIS_SEBEBLERI = ["İtib", "Xarab olub", "Vaxtı bitib", "Oğurlanıb", "
 const STOK_SEHIFE_OLCUSU = 50;
 
 function StokPage() {
-  const { products, stockMovements, adjustStockBy } = useMarket();
+  const { products, stockMovements, adjustStockBy, updateProduct } = useMarket();
   const [giren, setGiren] = useState(null); // product being stocked in
   const [cixan, setCixan] = useState(null); // product being written off
   const [miqdar, setMiqdar] = useState("");
   const [sebeb, setSebeb] = useState(CIXIS_SEBEBLERI[0]);
   const [sebebQeyd, setSebebQeyd] = useState("");
   const [error, setError] = useState("");
+  // "Mal qəbulu" — 1C-style multi-item goods receipt: scan barcode after
+  // barcode, each scan looks the product up and adds/increments a row;
+  // qty and prices are editable before one batch save.
+  const [qebulOpen, setQebulOpen] = useState(false);
+  const [qebulRows, setQebulRows] = useState([]);
+  const [qebulBarkod, setQebulBarkod] = useState("");
+  const [qebulError, setQebulError] = useState("");
+  const [qebulSaving, setQebulSaving] = useState(false);
   // Same rationale as MehsullarPage: a large catalog import can put tens of
   // thousands of rows here, and rendering them all at once freezes the tab.
   const [page, setPage] = useState(0);
@@ -2546,6 +2554,65 @@ function StokPage() {
     setCixan(null);
   };
 
+  const openQebul = () => {
+    setQebulRows([]);
+    setQebulBarkod("");
+    setQebulError("");
+    setQebulOpen(true);
+  };
+
+  const qebulScan = (rawCode) => {
+    const code = rawCode.trim();
+    if (!code) return;
+    const product = products.find((p) => p.kod === code);
+    if (!product) {
+      setQebulError(`Bu barkodla məhsul tapılmadı: ${code}`);
+      setQebulBarkod("");
+      return;
+    }
+    setQebulError("");
+    setQebulBarkod("");
+    setQebulRows((rows) => {
+      const i = rows.findIndex((r) => r.kod === product.kod);
+      if (i >= 0) {
+        const next = [...rows];
+        next[i] = { ...next[i], miqdar: next[i].miqdar + 1 };
+        return next;
+      }
+      return [...rows, { kod: product.kod, ad: product.ad, miqdar: 1, alish: product.alish, satish: product.satish }];
+    });
+  };
+
+  const updateQebulRow = (kod, field, value) => {
+    setQebulRows((rows) => rows.map((r) => (r.kod === kod ? { ...r, [field]: value } : r)));
+  };
+  const removeQebulRow = (kod) => setQebulRows((rows) => rows.filter((r) => r.kod !== kod));
+
+  const qebulTotal = qebulRows.reduce((s, r) => s + (Number(r.miqdar) || 0) * (Number(r.alish) || 0), 0);
+
+  // Applies every row as a stock-in movement, and only touches prices for
+  // rows where the entered value actually differs from the product's
+  // current price — avoids a no-op PUT (and a spurious edit trail) for
+  // rows the user left untouched.
+  const saveQebul = async () => {
+    if (qebulRows.length === 0) return;
+    setQebulSaving(true);
+    setQebulError("");
+    for (const r of qebulRows) {
+      const n = Number(r.miqdar);
+      if (!n || n <= 0) continue;
+      const ok = await adjustStockBy(r.kod, n, "Mal qəbulu");
+      if (!ok) { setQebulError(`"${r.ad}" üçün yadda saxlanmadı — serverlə əlaqəni yoxlayın.`); setQebulSaving(false); return; }
+      const current = products.find((p) => p.kod === r.kod);
+      const patch = {};
+      if (current && Number(r.alish) !== current.alish) patch.alish = Number(r.alish);
+      if (current && Number(r.satish) !== current.satish) patch.satish = Number(r.satish);
+      if (Object.keys(patch).length > 0) await updateProduct(r.kod, patch);
+    }
+    setQebulSaving(false);
+    setQebulOpen(false);
+  };
+
   // "Excel-ə export" of the movement log (not the product list) — every
   // stock-in and every write-off, with its reason, so a full audit report
   // can be pulled without digging through the app.
@@ -2599,6 +2666,9 @@ function StokPage() {
             </select>
             <button onClick={exportMovements} className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 hover:text-gray-700">
               <Download size={14} /> Stok hərəkətləri (Excel)
+            </button>
+            <button onClick={openQebul} className="bg-[#16a34a] hover:bg-[#15803d] text-white rounded-lg px-3 py-1.5 text-xs font-bold">
+              MAL QƏBULU
             </button>
           </div>
         </div>
@@ -2696,6 +2766,92 @@ function StokPage() {
               <button onClick={saveCixan} className="flex-[2] bg-red-600 hover:bg-red-700 text-white rounded-xl py-2.5 font-bold text-sm">
                 Çıxar
               </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {qebulOpen && (
+        <Modal title="Mal qəbulu" onClose={() => setQebulOpen(false)} widthClass="max-w-2xl">
+          <div className="space-y-4">
+            <FormField
+              label="Barkodu skan edin və ya daxil edin"
+              value={qebulBarkod}
+              onChange={(e) => setQebulBarkod(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && qebulScan(qebulBarkod)}
+              autoFocus
+            />
+            {qebulError && <div className="text-red-500 text-xs font-semibold">{qebulError}</div>}
+            {qebulRows.length > 0 && (
+              <div className="border border-gray-200 rounded-xl overflow-hidden max-h-80 overflow-y-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 sticky top-0">
+                    <tr className="text-left text-gray-400 text-xs">
+                      <th className="py-2 px-3">Mal</th>
+                      <th className="py-2 px-3 w-20">Miqdar</th>
+                      <th className="py-2 px-3 w-24">Alış qiy.</th>
+                      <th className="py-2 px-3 w-24">Satış qiy.</th>
+                      <th className="py-2 px-3 w-24">Məbləğ</th>
+                      <th className="py-2 px-3 w-8"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {qebulRows.map((r) => (
+                      <tr key={r.kod} className="border-t border-gray-100">
+                        <td className="py-2 px-3 font-medium">{r.ad}<div className="text-[10px] text-gray-400">{r.kod}</div></td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="number"
+                            value={r.miqdar}
+                            onChange={(e) => updateQebulRow(r.kod, "miqdar", e.target.value)}
+                            className="w-full border border-gray-200 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-green-400"
+                          />
+                        </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="number"
+                            value={r.alish}
+                            onChange={(e) => updateQebulRow(r.kod, "alish", e.target.value)}
+                            className="w-full border border-gray-200 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-green-400"
+                          />
+                        </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="number"
+                            value={r.satish}
+                            onChange={(e) => updateQebulRow(r.kod, "satish", e.target.value)}
+                            className="w-full border border-gray-200 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-green-400"
+                          />
+                        </td>
+                        <td className="py-2 px-3 font-semibold">{fmt((Number(r.miqdar) || 0) * (Number(r.alish) || 0))}</td>
+                        <td className="py-2 px-3">
+                          <button onClick={() => removeQebulRow(r.kod)} className="text-gray-400 hover:text-red-500">
+                            <XCircle size={16} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {qebulRows.length === 0 && (
+              <div className="text-xs text-gray-400 text-center py-6">Barkod skan edərək mal siyahısına əlavə edin.</div>
+            )}
+            <div className="flex items-center justify-between border-t border-gray-100 pt-3">
+              <div className="text-sm font-bold">Cəmi: {fmt(qebulTotal)} AZN</div>
+              <div className="flex gap-2">
+                <button onClick={() => setQebulOpen(false)} className="py-2.5 px-4 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
+                  Ləğv et
+                </button>
+                <button
+                  onClick={saveQebul}
+                  disabled={qebulRows.length === 0 || qebulSaving}
+                  className="py-2.5 px-6 bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl font-bold text-sm"
+                >
+                  {qebulSaving ? "Saxlanılır..." : "Yadda saxla"}
+                </button>
+              </div>
             </div>
           </div>
         </Modal>
