@@ -4148,14 +4148,28 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
     let started = false;
     const html5QrCode = new Html5Qrcode(regionIdRef.current, {
       formatsToSupport: BARCODE_FORMATS,
+      // Modern Android Chrome exposes the browser's own native barcode
+      // decoder (BarcodeDetector), which is dramatically faster and more
+      // reliable at 1D retail barcodes than the bundled zxing-js fallback —
+      // without this, html5-qrcode always uses the JS fallback even when
+      // the native one is available.
+      useBarCodeDetectorIfSupported: true,
       verbose: false,
     });
     scannerRef.current = html5QrCode;
 
     html5QrCode
       .start(
-        { facingMode: "environment" },
-        { fps: 12, qrbox: { width: 280, height: 160 }, disableFlip: true },
+        // An unconstrained "environment" request lets some phones pick a
+        // low-res stream (e.g. 640x480) that's too coarse to resolve a
+        // barcode's fine bars — ask for at least 720p so there's enough
+        // detail to decode from a normal holding distance.
+        { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+        // A short, wide box matches a barcode's actual proportions (a
+        // barcode is much wider than it is tall) — the previous 280x160
+        // box was nearly square, which just wasted scan area outside
+        // where a barcode's bars actually sit.
+        { fps: 15, qrbox: { width: 300, height: 120 }, disableFlip: true, aspectRatio: 1.777 },
         (decodedText) => {
           const now = Date.now();
           if (decodedText === lastRef.current.code && now - lastRef.current.time < rescanDelayMs) return;
