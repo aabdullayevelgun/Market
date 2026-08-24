@@ -18,6 +18,23 @@ function isLocalRequest(req) {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
 
+// A raw TCP source-IP check (isLocalRequest) is not enough on its own: a
+// malicious page open in any OTHER browser tab on the Admin PC can silently
+// fetch("http://localhost:4000/...") too, and the request still arrives
+// from 127.0.0.1 — indistinguishable, by IP alone, from the real app. The
+// browser is required to tell the server which page's JS actually made the
+// request via the Origin header, and it cannot be spoofed by page content
+// (only the browser sets it). Our own app — the packaged Electron build
+// (file://, so Origin is absent/"null") or the Vite dev server — never
+// presents an arbitrary public-website Origin, so anything that does is
+// rejected outright, regardless of what isLocalRequest or the token say.
+const TRUSTED_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|(\d{1,3}\.){3}\d{1,3})(:\d+)?$/i;
+function isTrustedOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin || origin === "null") return true; // file:// app, or a non-browser caller
+  return TRUSTED_ORIGIN_RE.test(origin);
+}
+
 // The Admin PC (physically trusted, talks to its own server over loopback)
 // is always authorized. Any other device — a Kassa PC, or anyone else on the
 // LAN who has the shared token — must also present the admin password before
@@ -27,7 +44,7 @@ function isLocalRequest(req) {
 function isAdminAuthorized(req, data) {
   if (isLocalRequest(req)) return true;
   const pw = req.header("x-admin-password");
-  return !!pw && pw === (data.settings.adminSifre || "2580");
+  return !!pw && !!data.settings.adminSifre && pw === data.settings.adminSifre;
 }
 
 function getLocalIp() {
@@ -96,8 +113,22 @@ function loadData(dataFile) {
     if (!data) throw err; // no usable backup either — nothing more we can do
   }
   if (!data.settings) data.settings = {};
+  let settingsChanged = false;
   if (!data.settings.apiToken) {
     data.settings.apiToken = generateToken();
+    settingsChanged = true;
+  }
+  // A shared, publicly-documented fallback password (this app's old default
+  // was "2580", visible to anyone reading the source) is exactly as weak as
+  // having no password at all — every install would share the same one
+  // unless someone remembered to change it. A random one generated per
+  // install, like the LAN token above, closes that off without needing the
+  // person to do anything on first run.
+  if (!data.settings.adminSifre) {
+    data.settings.adminSifre = generateToken().slice(0, 8);
+    settingsChanged = true;
+  }
+  if (settingsChanged) {
     writeFileAtomic(dataFile, JSON.stringify(data, null, 2));
   }
   if (!Array.isArray(data.stockMovements)) data.stockMovements = [];
@@ -130,13 +161,29 @@ function startServer(userDataDir, port = 4000, onError) {
   const app = express();
   app.use(express.json());
 
-  // Allow requests from the Kassa computer(s) on the local network.
+  // Allow requests from the Kassa computer(s) on the local network — but
+  // only ones our own app could plausibly have sent (see isTrustedOrigin).
+  // A response is never made CORS-readable to a page we don't trust, even
+  // for routes that don't otherwise require a password/token.
   app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Headers", "*");
-    res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+    if (isTrustedOrigin(req)) {
+      res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
+      res.header("Access-Control-Allow-Headers", "*");
+      res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+    }
     if (req.method === "OPTIONS") return res.sendStatus(200);
     next();
+  });
+
+  // Reject outright — before any auth/token logic even runs — any request
+  // whose Origin header shows it was fired from a page we don't trust (see
+  // isTrustedOrigin's comment). This is what actually stops a malicious
+  // website's background fetch() from acting through the Admin PC's own
+  // browser, since IP-based "isLocalRequest" trust alone can't tell the
+  // difference between our app and any other open tab on that machine.
+  app.use((req, res, next) => {
+    if (req.path === "/api/ping" || isTrustedOrigin(req)) return next();
+    res.status(403).json({ error: "Etibarsız mənşə (origin)." });
   });
 
   // The Admin PC talks to its own server over localhost and is always trusted.

@@ -90,7 +90,7 @@ const INITIAL_SETTINGS = {
   avtomatikCek: true,
   endirimSistemi: true,
   tereziPrefiks: "22",
-  adminSifre: "2580",
+  adminSifre: "",
   cekBasliqQeydi: "",
   cekTesekkurMesaji: "TƏŞƏKKÜRLƏR!\nXoş gəlmisiniz!",
 };
@@ -3792,7 +3792,7 @@ function Inner({ role, app, setApp, onResetRole }) {
   };
 
   const submitPw = () => {
-    if (pwInput === (settings.adminSifre || "2580")) {
+    if (settings.adminSifre && pwInput === settings.adminSifre) {
       setUnlocked(true);
       setAdminPw(pwInput);
       setPwOpen(false);
