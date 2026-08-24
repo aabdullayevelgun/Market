@@ -4834,6 +4834,111 @@ function MalQebuluBody() {
   );
 }
 
+const DUZELIS_SEBEBLERI = ["Tapıldı", "İtib", "Xarab olub", "Sayım fərqi", "Digər"];
+
+// "Düzəliş" (phone) — a quick single-product +/- correction, separate from
+// Stok sayımı's full-recount flow: scan one item, bump or trim its stock by
+// a small amount, done. Applied immediately (adjustStockBy), not staged
+// like Mal qəbulu/Sayım — there's nothing to reconcile against, it's just
+// "I found 5 more of these" or "2 of these went bad", one item at a time.
+function DuzelisBody() {
+  const { products, settings, adjustStockBy } = useMarket();
+  const [found, setFound] = useState(null);
+  const [unknownKod, setUnknownKod] = useState(null);
+  const [miqdar, setMiqdar] = useState("1");
+  const [sebeb, setSebeb] = useState(DUZELIS_SEBEBLERI[0]);
+  const [applying, setApplying] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const handleDecode = (code) => {
+    const { product } = resolveScannedProduct(code, products, settings);
+    if (!product) {
+      setUnknownKod(code);
+      setFound(null);
+      return;
+    }
+    setUnknownKod(null);
+    setFound(product);
+    setMiqdar("1");
+    setSebeb(DUZELIS_SEBEBLERI[0]);
+  };
+
+  const apply = async (sign) => {
+    const n = parseInt(miqdar, 10);
+    if (!found || !n || n <= 0) return;
+    setApplying(true);
+    const delta = sign * n;
+    const ok = await adjustStockBy(found.kod, delta, sign < 0 ? sebeb : "Tapıldı (telefon düzəlişi)");
+    setApplying(false);
+    if (ok) {
+      setFound((f) => (f ? { ...f, stok: Math.max(0, f.stok + delta) } : f));
+      setMsg({ text: `${found.ad}: stok ${sign > 0 ? "+" : "-"}${n}`, isError: false });
+    } else {
+      setMsg({ text: "Yadda saxlanmadı — serverlə əlaqəni yoxlayın.", isError: true });
+    }
+    setTimeout(() => setMsg(null), 3000);
+  };
+
+  return (
+    <>
+      <BarcodeScannerView onDecode={handleDecode} />
+
+      {unknownKod && (
+        <div className="mt-4">
+          <UnknownBarcodeCard kod={unknownKod} onDismiss={() => setUnknownKod(null)} onAdded={() => setUnknownKod(null)} />
+        </div>
+      )}
+
+      {found && !unknownKod && (
+        <div className="mt-4 bg-white rounded-2xl border border-gray-200 p-4">
+          <div className="font-bold text-lg leading-tight">{found.ad}</div>
+          <div className="text-xs text-gray-400 font-mono mb-3">{found.kod}</div>
+          <div className="text-sm text-gray-500 mb-3">
+            Mövcud stok: <span className="font-bold text-gray-800">{found.stok}</span>
+          </div>
+          <FormField label="Miqdar" type="number" value={miqdar} onChange={(e) => setMiqdar(e.target.value)} />
+          <div className="mt-3">
+            <div className="text-xs text-gray-500 mb-1">Səbəb (çıxarma üçün)</div>
+            <select
+              value={sebeb}
+              onChange={(e) => setSebeb(e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm"
+            >
+              {DUZELIS_SEBEBLERI.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div className="flex gap-2 mt-4">
+            <button
+              onClick={() => apply(-1)}
+              disabled={applying || !miqdar || Number(miqdar) <= 0}
+              className="flex-1 bg-red-50 hover:bg-red-100 text-red-600 disabled:opacity-40 rounded-xl py-3 font-bold text-sm"
+            >
+              − Çıxar
+            </button>
+            <button
+              onClick={() => apply(1)}
+              disabled={applying || !miqdar || Number(miqdar) <= 0}
+              className="flex-1 bg-[#16a34a] hover:bg-[#15803d] text-white disabled:opacity-40 rounded-xl py-3 font-bold text-sm"
+            >
+              + Əlavə et
+            </button>
+          </div>
+        </div>
+      )}
+
+      {msg && (
+        <div className={`mt-4 text-sm font-semibold rounded-xl px-3 py-2 ${msg.isError ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}>
+          {msg.text}
+        </div>
+      )}
+
+      {!found && !unknownKod && (
+        <div className="mt-4 text-center text-sm text-gray-400 py-8">Düzəliş etmək üçün barkodu kameraya göstərin.</div>
+      )}
+    </>
+  );
+}
+
 function BackupPage() {
   const { products, sales, employees, suppliers, stockMovements, purchases, settings, setSettings, restoreBackup } = useMarket();
   const [restoring, setRestoring] = useState(false);
@@ -5297,18 +5402,19 @@ function TelefonSkanerShell({ onResetRole }) {
 
         {/* Segmented tab switch — raised "3D" pill */}
         <div
-          className="grid grid-cols-3 gap-1 p-1.5 rounded-2xl mb-5"
+          className="grid grid-cols-4 gap-1 p-1.5 rounded-2xl mb-5"
           style={{ background: "rgba(0,0,0,0.35)", boxShadow: "inset 0 2px 6px rgba(0,0,0,0.5)" }}
         >
           {[
             { key: "sayim", label: "Sayım", icon: ClipboardList },
-            { key: "qebul", label: "Mal qəbulu", icon: Download },
+            { key: "qebul", label: "Qəbul", icon: Download },
+            { key: "duzelis", label: "Düzəliş", icon: Plus },
             { key: "qiymet", label: "Qiymət", icon: Tag },
           ].map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               onClick={() => setTab(key)}
-              className={`flex items-center justify-center gap-1.5 py-3 rounded-xl text-xs font-bold transition-all ${
+              className={`flex items-center justify-center gap-1 py-3 rounded-xl text-[11px] font-bold transition-all ${
                 tab === key ? "text-[#0c4526]" : "text-white/50"
               }`}
               style={
@@ -5317,7 +5423,7 @@ function TelefonSkanerShell({ onResetRole }) {
                   : {}
               }
             >
-              <Icon size={15} /> {label}
+              <Icon size={14} /> {label}
             </button>
           ))}
         </div>
@@ -5329,6 +5435,7 @@ function TelefonSkanerShell({ onResetRole }) {
           style={{ boxShadow: "0 20px 40px -15px rgba(0,0,0,0.6)" }}
         >
           {tab === "sayim" && <StokSayimiBody />}
+          {tab === "duzelis" && <DuzelisBody />}
           {tab === "qebul" && <MalQebuluBody />}
           {tab === "qiymet" && <QiymetYoxlaBody />}
         </div>
