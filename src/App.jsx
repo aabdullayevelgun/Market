@@ -4172,8 +4172,14 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
 
     const hints = new Map();
     hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
-    hints.set(DecodeHintType.TRY_HARDER, true);
-    const reader = new BrowserMultiFormatReader(hints);
+    // TRY_HARDER makes each decode attempt noticeably heavier — worth it
+    // when decoding was failing outright, but now that it works, it was
+    // the likely cause of the camera preview stuttering/"ilişmə": each
+    // attempt runs synchronously on the main thread with no gap between
+    // them by default. Off now that plain decoding is reliable, and an
+    // explicit small gap between attempts gives the UI thread room to
+    // breathe between them instead of decoding back-to-back at max rate.
+    const reader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 150, delayBetweenScanSuccess: rescanDelayMs });
 
     reader
       .decodeFromConstraints(
