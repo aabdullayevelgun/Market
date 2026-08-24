@@ -4669,9 +4669,13 @@ function QiymetYoxlaPage() {
 
 // Split out for the same reason as StokSayimiBody above.
 function QiymetYoxlaBody() {
-  const { products, settings, loading } = useMarket();
+  const { products, settings, loading, updateProduct } = useMarket();
   const [found, setFound] = useState(null);
   const [unknownKod, setUnknownKod] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const [priceInput, setPriceInput] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState(null);
 
   const handleDecode = (code) => {
     const { product } = resolveScannedProduct(code, products, settings);
@@ -4682,6 +4686,28 @@ function QiymetYoxlaBody() {
     }
     setUnknownKod(null);
     setFound(product);
+    setEditing(false);
+  };
+
+  const startEdit = () => {
+    setPriceInput(String(found.satish));
+    setEditing(true);
+  };
+
+  const savePrice = async () => {
+    const n = parseFloat(String(priceInput).replace(",", "."));
+    if (!found || isNaN(n) || n < 0) return;
+    setSaving(true);
+    const ok = await updateProduct(found.kod, { satish: n });
+    setSaving(false);
+    if (ok) {
+      setFound((f) => (f ? { ...f, satish: n } : f));
+      setEditing(false);
+      setMsg({ text: "Qiymət yeniləndi.", isError: false });
+    } else {
+      setMsg({ text: "Yadda saxlanmadı — serverlə əlaqəni yoxlayın.", isError: true });
+    }
+    setTimeout(() => setMsg(null), 3000);
   };
 
   const endirimli = found && found.endirim > 0 ? round2(found.satish * (1 - found.endirim / 100)) : null;
@@ -4709,18 +4735,57 @@ function QiymetYoxlaBody() {
           </div>
           <div className="font-bold text-xl leading-tight mb-1">{found.ad}</div>
           <div className="text-xs text-gray-400 font-mono mb-4">{found.kod}</div>
-          {endirimli != null ? (
-            <>
-              <div className="text-gray-400 line-through text-lg">{fmt(found.satish)} ₼</div>
-              <div className="text-4xl font-extrabold text-green-600 my-1">{fmt(endirimli)} ₼</div>
-              <div className="text-xs font-semibold text-amber-600 mb-3">Endirim: {found.endirim}%</div>
-            </>
+
+          {editing ? (
+            <div className="space-y-3">
+              <FormField
+                label="Yeni satış qiyməti (AZN)"
+                type="number"
+                value={priceInput}
+                onChange={(e) => setPriceInput(e.target.value)}
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button onClick={() => setEditing(false)} className="flex-1 py-2.5 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
+                  Ləğv et
+                </button>
+                <button
+                  onClick={savePrice}
+                  disabled={saving || !priceInput}
+                  className="flex-[2] bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl py-2.5 font-bold text-sm"
+                >
+                  {saving ? "Saxlanılır..." : "Yadda saxla"}
+                </button>
+              </div>
+            </div>
           ) : (
-            <div className="text-4xl font-extrabold text-green-600 my-2">{fmt(found.satish)} ₼</div>
+            <>
+              {endirimli != null ? (
+                <>
+                  <div className="text-gray-400 line-through text-lg">{fmt(found.satish)} ₼</div>
+                  <div className="text-4xl font-extrabold text-green-600 my-1">{fmt(endirimli)} ₼</div>
+                  <div className="text-xs font-semibold text-amber-600 mb-3">Endirim: {found.endirim}%</div>
+                </>
+              ) : (
+                <div className="text-4xl font-extrabold text-green-600 my-2">{fmt(found.satish)} ₼</div>
+              )}
+              <div className="text-sm text-gray-500 mb-4">
+                Stok: <span className="font-semibold text-gray-700">{found.stok} {found.vahid || "ədəd"}</span>
+              </div>
+              <button
+                onClick={startEdit}
+                className="w-full border-2 border-gray-200 hover:border-green-400 rounded-xl py-2.5 font-bold text-sm text-gray-600"
+              >
+                Qiyməti dəyiş
+              </button>
+            </>
           )}
-          <div className="text-sm text-gray-500">
-            Stok: <span className="font-semibold text-gray-700">{found.stok} {found.vahid || "ədəd"}</span>
-          </div>
+        </div>
+      )}
+
+      {msg && (
+        <div className={`mt-4 text-sm font-semibold rounded-xl px-3 py-2 ${msg.isError ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}>
+          {msg.text}
         </div>
       )}
 
