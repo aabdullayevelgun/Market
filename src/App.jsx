@@ -216,20 +216,25 @@ const useMarket = () => useContext(MarketContext);
 const emptyState = { products: [], sales: [], employees: [], suppliers: [], settings: INITIAL_SETTINGS };
 
 const PENDING_SALES_KEY = "zehra_pending_sales";
-// Everything EXCEPT sales history — a full year of receipts can be many MB
-// and isn't needed to ring up a sale, while the product catalog (a few MB)
-// comfortably fits localStorage's ~10MB ceiling. Written on every successful
-// sync, so a Kassa PC that boots up before the Admin PC is even on for the
-// day still has this morning's — or worst case, yesterday's — prices and
-// stock to sell against, instead of an empty "Nəticə tapılmadı" catalog
-// until the two computers happen to be on at the same time.
+const PENDING_STOCK_KEY = "zehra_pending_stock";
+// Everything, but only the RECENT slice of sales — a full year of receipts
+// can be many MB (this store's whole history alone was ~10MB) and a Kassa
+// PC only ever needs to browse recent checks while offline, not the entire
+// archive. The catalog (products/settings/etc, a few MB) plus a few hundred
+// recent receipts comfortably fits localStorage's ~10MB ceiling. Written on
+// every successful sync, so a Kassa PC that boots up before the Admin PC is
+// even on for the day still has this morning's — or worst case, yesterday's
+// — prices, stock, and recent checks to work with, instead of an empty
+// "Nəticə tapılmadı" catalog until the two computers happen to be on at the
+// same time.
 const CATALOG_CACHE_KEY = "zehra_catalog_cache";
+const CACHED_SALES_LIMIT = 300;
 
 function loadCachedCatalog() {
   try {
     const cached = JSON.parse(localStorage.getItem(CATALOG_CACHE_KEY) || "null");
     if (!cached) return emptyState;
-    return { ...emptyState, ...cached, sales: [] };
+    return { ...emptyState, ...cached, sales: cached.sales || [] };
   } catch {
     return emptyState;
   }
@@ -237,8 +242,12 @@ function loadCachedCatalog() {
 
 function saveCachedCatalog(data) {
   try {
-    const { products, employees, suppliers, settings } = data;
-    localStorage.setItem(CATALOG_CACHE_KEY, JSON.stringify({ products, employees, suppliers, settings }));
+    const { products, employees, suppliers, settings, sales } = data;
+    // Sales are newest-first (server unshift()s new ones onto the front).
+    localStorage.setItem(
+      CATALOG_CACHE_KEY,
+      JSON.stringify({ products, employees, suppliers, settings, sales: (sales || []).slice(0, CACHED_SALES_LIMIT) })
+    );
   } catch (err) {
     // Quota exceeded or storage disabled — offline catalog just won't be
     // available next cold boot; the live app keeps working either way.
@@ -263,6 +272,26 @@ function MarketProvider({ children, serverUrl, token = "" }) {
   const persistPending = (list) => {
     setPendingSales(list);
     localStorage.setItem(PENDING_SALES_KEY, JSON.stringify(list));
+  };
+
+  // Same idea as pendingSales: a stock-in/write-off made while offline
+  // shouldn't just fail with an error and force the cashier to remember to
+  // redo it later. Queued locally, applied to the *local* product list
+  // immediately (so the count on screen is right straight away), and
+  // replayed to the server in order once the connection is back.
+  const [pendingStock, setPendingStock] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(PENDING_STOCK_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
+  const pendingStockRef = React.useRef(pendingStock);
+  pendingStockRef.current = pendingStock;
+
+  const persistPendingStock = (list) => {
+    setPendingStock(list);
+    localStorage.setItem(PENDING_STOCK_KEY, JSON.stringify(list));
   };
 
   // Set only after the Admin-panel password prompt is passed (see Inner/
@@ -336,8 +365,21 @@ function MarketProvider({ children, serverUrl, token = "" }) {
   const updateProduct = (kod, patch) => call("PUT", `/api/products/${encodeURIComponent(kod)}`, patch);
   // delta > 0 = mal gəldi (stock-in), delta < 0 = stokdan çıxar (write-off,
   // reason required) — recorded as a stock movement instead of silently
-  // overwriting the total.
-  const adjustStockBy = (kod, delta, reason) => call("POST", "/api/stock/adjust", { kod, delta, reason });
+  // overwriting the total. Offline, this queues (same as addSale) instead
+  // of just failing: a "Mal gəldi"/"Stokdan çıxar" made while the Admin PC
+  // is unreachable is applied to the local product list right away — so
+  // the count on screen is correct immediately — and replayed to the
+  // server, in order, once the connection returns.
+  const adjustStockBy = async (kod, delta, reason) => {
+    const ok = await call("POST", "/api/stock/adjust", { kod, delta, reason });
+    if (ok) return true;
+    persistPendingStock([...pendingStockRef.current, { kod, delta, reason }]);
+    setState((s) => ({
+      ...s,
+      products: s.products.map((p) => (p.kod === kod ? { ...p, stok: Math.max(0, (p.stok || 0) + delta) } : p)),
+    }));
+    return true;
+  };
   const deleteProduct = (kod) => call("DELETE", `/api/products/${encodeURIComponent(kod)}`);
   const adjustStock = (kod, newStok) => updateProduct(kod, { stok: newStok });
   const addSupplier = (s) => call("POST", "/api/suppliers", s);
@@ -372,6 +414,24 @@ function MarketProvider({ children, serverUrl, token = "" }) {
       cancelled = true;
     };
   }, [connected]);
+
+  React.useEffect(() => {
+    if (!connected || pendingStockRef.current.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const remaining = [...pendingStockRef.current];
+      while (remaining.length > 0 && !cancelled) {
+        const { kod, delta, reason } = remaining[0];
+        const ok = await call("POST", "/api/stock/adjust", { kod, delta, reason });
+        if (!ok) break; // still can't reach the server — stop, retry on next reconnect
+        remaining.shift();
+        persistPendingStock(remaining);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [connected]);
   const setSettings = (s) => call("PUT", "/api/settings", s);
   const restoreBackup = (data) => call("POST", "/api/restore", data);
   const importProducts = (list) => call("POST", "/api/products/import", { products: list });
@@ -388,6 +448,7 @@ function MarketProvider({ children, serverUrl, token = "" }) {
     ...state,
     sales: [...pendingSales.map((s) => ({ ...s, _pending: true })), ...state.sales],
     pendingCount: pendingSales.length,
+    pendingStockCount: pendingStock.length,
     connected, loading,
     addProduct, updateProduct, deleteProduct, adjustStock, adjustStockBy, returnSale,
     addSupplier, updateSupplier, deleteSupplier, addEmployee, deleteEmployee, addSale, setSettings, restoreBackup,
@@ -3890,20 +3951,22 @@ function AdminView({ onResetRole }) {
 // document flow and silently block clicks on whatever happens to sit at the
 // same coordinates (e.g. the Kassa/Admin toggle). `sticky` reserves its own
 // space (pushing everything else down) while still staying visible on scroll.
-function ConnectionBanner({ connected, pendingCount }) {
-  if (connected && !pendingCount) return null;
+function ConnectionBanner({ connected, pendingCount, pendingStockCount }) {
+  const totalPending = pendingCount + pendingStockCount;
+  if (connected && !totalPending) return null;
   if (!connected) {
     return (
       <div className="bg-red-600 text-white text-sm font-semibold text-center py-2 px-4 sticky top-0 z-[100]">
         ⚠ Serverlə əlaqə yoxdur — Admin kompüteri açıq və eyni şəbəkədə olduğundan əmin olun.
-        {pendingCount > 0 && ` Satışlar lokal saxlanılır (${pendingCount}) — əlaqə bərpa olunanda avtomatik göndəriləcək.`}
+        {totalPending > 0 &&
+          ` Lokal saxlanılır: ${pendingCount} satış, ${pendingStockCount} stok dəyişikliyi — əlaqə bərpa olunanda avtomatik göndəriləcək.`}
       </div>
     );
   }
-  // Connected again but still flushing the queued sales from while we were offline.
+  // Connected again but still flushing the queue from while we were offline.
   return (
     <div className="bg-amber-500 text-white text-sm font-semibold text-center py-2 px-4 sticky top-0 z-[100]">
-      ⏳ {pendingCount} gözləyən satış serverə göndərilir...
+      ⏳ {totalPending} gözləyən qeyd serverə göndərilir...
     </div>
   );
 }
@@ -3918,7 +3981,7 @@ function MainApp({ role, serverUrl, token, onResetRole }) {
 }
 
 function Inner({ role, app, setApp, onResetRole }) {
-  const { connected, settings, pendingCount, setAdminPw } = useMarket();
+  const { connected, settings, pendingCount, pendingStockCount, setAdminPw } = useMarket();
   const [pwOpen, setPwOpen] = useState(false);
   const [pwInput, setPwInput] = useState("");
   const [pwError, setPwError] = useState(false);
@@ -3947,11 +4010,11 @@ function Inner({ role, app, setApp, onResetRole }) {
 
   return (
     <div>
-      <ConnectionBanner connected={connected} pendingCount={pendingCount} />
+      <ConnectionBanner connected={connected} pendingCount={pendingCount} pendingStockCount={pendingStockCount} />
       {role === "admin" && (
         <div
           className="fixed right-3 z-[60] bg-white shadow-lg rounded-full p-1 flex gap-1 border border-gray-200 transition-[top]"
-          style={{ top: connected && !pendingCount ? "12px" : "48px" }}
+          style={{ top: connected && !pendingCount && !pendingStockCount ? "12px" : "48px" }}
         >
           <button
             onClick={() => setApp("kassa")}
