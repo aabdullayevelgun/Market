@@ -3917,7 +3917,10 @@ function Inner({ role, app, setApp, onResetRole }) {
     <div>
       <ConnectionBanner connected={connected} pendingCount={pendingCount} />
       {role === "admin" && (
-        <div className="fixed top-3 right-3 z-[60] bg-white shadow-lg rounded-full p-1 flex gap-1 border border-gray-200">
+        <div
+          className="fixed right-3 z-[60] bg-white shadow-lg rounded-full p-1 flex gap-1 border border-gray-200 transition-[top]"
+          style={{ top: connected && !pendingCount ? "12px" : "48px" }}
+        >
           <button
             onClick={() => setApp("kassa")}
             className={`px-4 py-1.5 rounded-full text-xs font-bold ${app === "kassa" ? "bg-[#16a34a] text-white" : "text-gray-500"}`}
