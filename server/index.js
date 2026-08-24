@@ -252,6 +252,10 @@ function startServer(userDataDir, port = 4000, onError) {
   const app = express();
   app.use(express.json());
 
+  // Filled in once getOrCreateHttpsCert resolves (see the HTTPS listener
+  // setup further down) — read by the /api/https-cert download route below.
+  let cachedCertPem = null;
+
   // Allow requests from the Kassa computer(s) on the local network — but
   // only ones our own app could plausibly have sent (see isTrustedOrigin).
   // A response is never made CORS-readable to a page we don't trust, even
@@ -299,6 +303,20 @@ function startServer(userDataDir, port = 4000, onError) {
   app.use(express.static(path.join(__dirname, "../dist")));
 
   app.get("/api/ping", (req, res) => res.json({ ok: true, name: "Zəhrə Market Server" }));
+
+  // Plain-HTTP download of our self-signed HTTPS cert, meant to be opened
+  // directly on the phone (http://<ip>:PORT/api/https-cert — no https, no
+  // token needed, this is just a public cert file). iOS in particular won't
+  // grant camera access on the HTTPS port until this is installed AND
+  // marked fully trusted under Settings → General → About → Certificate
+  // Trust Settings — tapping through the in-browser "not secure" warning
+  // alone isn't enough there, unlike Android.
+  app.get("/api/https-cert", (req, res) => {
+    if (!cachedCertPem) return res.status(503).send("Sertifikat hələ hazırlanır, bir neçə saniyə sonra yenidən cəhd edin.");
+    res.set("Content-Type", "application/x-x509-ca-cert");
+    res.set("Content-Disposition", "attachment; filename=zehra-market.pem");
+    res.send(cachedCertPem);
+  });
 
   app.get("/api/network-info", (req, res) => {
     const data = loadData(dataFile);
@@ -643,6 +661,7 @@ function startServer(userDataDir, port = 4000, onError) {
   const httpsPort = port + 443;
   getOrCreateHttpsCert(userDataDir)
     .then(({ key, cert }) => {
+      cachedCertPem = cert;
       const httpsServer = https.createServer({ key, cert }, app).listen(httpsPort, "0.0.0.0", () => {
         console.log(`Zəhrə Market HTTPS (Telefon/Skaner): https://0.0.0.0:${httpsPort}`);
       });
