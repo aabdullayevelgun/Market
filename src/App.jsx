@@ -4150,6 +4150,12 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
   const [torchOn, setTorchOn] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
   const [error, setError] = useState("");
+  // Temporary on-screen diagnostics — shows what the per-frame decode
+  // attempts are actually returning (frame count + the most recent
+  // rejection reason), throttled to ~1/sec so it doesn't spam re-renders.
+  // The point is to see the REAL failure instead of guessing again.
+  const [debugInfo, setDebugInfo] = useState("");
+  const debugRef = React.useRef({ count: 0, lastUpdate: 0 });
 
   React.useEffect(() => {
     let cancelled = false;
@@ -4218,7 +4224,18 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
           if (navigator.vibrate) navigator.vibrate(70);
           onDecode(decodedText);
         },
-        () => {} // per-frame "nothing decoded yet" noise — expected on every frame without a code, not an error
+        (errMsg) => {
+          // Almost always "no code found in this frame" noise — but
+          // surfacing it (throttled) is what lets us tell that apart from
+          // "frames aren't arriving at all" or a hard decoder exception.
+          const d = debugRef.current;
+          d.count++;
+          const now = Date.now();
+          if (now - d.lastUpdate > 1000) {
+            d.lastUpdate = now;
+            setDebugInfo(`${d.count} kadr yoxlanıldı — son: ${String(errMsg).slice(0, 80)}`);
+          }
+        }
       )
       .then(() => {
         if (cancelled) {
@@ -4292,6 +4309,11 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
       {error && (
         <div className="absolute inset-0 bg-black/80 flex items-center justify-center p-4 text-center text-white text-sm font-semibold">
           {error}
+        </div>
+      )}
+      {!error && debugInfo && (
+        <div className="absolute bottom-0 inset-x-0 bg-black/70 text-white text-[10px] font-mono px-2 py-1 truncate">
+          {debugInfo}
         </div>
       )}
     </div>
