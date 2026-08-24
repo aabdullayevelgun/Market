@@ -164,16 +164,27 @@ function requireAdmin(req, res, data) {
   return false;
 }
 
+// Tailscale's virtual adapter hands out addresses in 100.64.0.0/10 (CGNAT
+// range) — it's a real, non-internal interface, so a plain "first
+// non-internal IPv4" scan picks it over the actual WiFi/LAN adapter once
+// Tailscale is installed. That's exactly backwards for this field's
+// purpose: it's shown to Kassa/Telefon devices as "connect to this IP over
+// your local network", not "connect over Tailscale" (that's the separate
+// admin.tailXXXX.ts.net hostname). Real LAN ranges are preferred first;
+// Tailscale's is only used as a last resort if nothing else is found.
+function isTailscaleIp(ip) {
+  const parts = ip.split(".").map(Number);
+  return parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
+}
 function getLocalIp() {
   const nets = os.networkInterfaces();
+  const candidates = [];
   for (const name of Object.keys(nets)) {
     for (const net of nets[name]) {
-      if (net.family === "IPv4" && !net.internal) {
-        return net.address;
-      }
+      if (net.family === "IPv4" && !net.internal) candidates.push(net.address);
     }
   }
-  return null;
+  return candidates.find((ip) => !isTailscaleIp(ip)) || candidates[0] || null;
 }
 
 function nowStr() {
