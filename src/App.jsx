@@ -4204,11 +4204,17 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
           // up stale frames instead of scanning faster. 10 is
           // html5-qrcode's own recommended default.
           fps: 10,
-          // A short, wide box matches a barcode's actual proportions (a
-          // barcode is much wider than it is tall) — smaller also means
-          // fewer pixels to run the decoder over per frame, which matters
-          // a lot on the slower JS fallback.
-          qrbox: { width: 260, height: 100 },
+          // A fixed small box (260x100) was the real bug behind "camera
+          // opens but never decodes": held at a normal distance, a
+          // real-world barcode is comfortably WIDER than that, so the box
+          // was cropping off its start/end bars every frame — zxing can't
+          // decode a barcode it only sees a middle slice of. Sized relative
+          // to the actual viewfinder instead, wide enough to hold a whole
+          // barcode without the user having to hunt for one exact distance.
+          qrbox: (viewfinderWidth, viewfinderHeight) => ({
+            width: Math.floor(viewfinderWidth * 0.9),
+            height: Math.floor(Math.min(viewfinderHeight * 0.4, viewfinderWidth * 0.35)),
+          }),
           disableFlip: true,
           // 1080p was overkill for the JS decoder — scanning a bigger frame
           // takes proportionally longer with no real accuracy gain past
