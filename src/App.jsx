@@ -4181,16 +4181,27 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
 
     html5QrCode
       .start(
-        // An unconstrained "environment" request lets some phones pick a
-        // low-res stream (e.g. 640x480) that's too coarse to resolve a
-        // barcode's fine bars — ask for at least 720p so there's enough
-        // detail to decode from a normal holding distance.
-        { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
-        // A short, wide box matches a barcode's actual proportions (a
-        // barcode is much wider than it is tall) — the previous 280x160
-        // box was nearly square, which just wasted scan area outside
-        // where a barcode's bars actually sit.
-        { fps: 15, qrbox: { width: 300, height: 120 }, disableFlip: true, aspectRatio: 1.777 },
+        // html5-qrcode validates this first argument strictly: as an
+        // object it must have EXACTLY one key (facingMode OR deviceId) —
+        // passing width/height alongside facingMode here (a previous
+        // "improvement") made every start() call reject outright with a
+        // validation error, on every device, regardless of camera
+        // permissions. The resolution hint belongs in the second config's
+        // videoConstraints instead.
+        { facingMode: "environment" },
+        {
+          fps: 15,
+          // A short, wide box matches a barcode's actual proportions (a
+          // barcode is much wider than it is tall) — a near-square box
+          // just wastes scan area outside where the bars actually sit.
+          qrbox: { width: 300, height: 120 },
+          disableFlip: true,
+          aspectRatio: 1.777,
+          // Ask for at least 1080p so there's enough detail to resolve a
+          // barcode's fine bars from a normal holding distance — an
+          // unconstrained request lets some phones pick a coarse stream.
+          videoConstraints: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+        },
         (decodedText) => {
           const now = Date.now();
           if (decodedText === lastRef.current.code && now - lastRef.current.time < rescanDelayMs) return;
