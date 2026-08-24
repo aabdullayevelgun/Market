@@ -4152,6 +4152,12 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
   const [torchOn, setTorchOn] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
   const [error, setError] = useState("");
+  // Digital zoom — for a barcode too small to resolve at the camera's
+  // minimum focus distance, physically getting closer just makes it blurry
+  // instead of clearer. Zooming in while staying at a focusable distance
+  // gets more pixels on the bars without fighting the lens's own limits.
+  const [zoom, setZoom] = useState(null);
+  const [zoomRange, setZoomRange] = useState(null); // { min, max, step }
 
   React.useEffect(() => {
     let cancelled = false;
@@ -4234,6 +4240,13 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
           const track = videoRef.current && videoRef.current.srcObject && videoRef.current.srcObject.getVideoTracks()[0];
           const caps = track && track.getCapabilities && track.getCapabilities();
           setTorchSupported(!!(caps && caps.torch));
+          if (caps && caps.zoom) {
+            setZoomRange({ min: caps.zoom.min, max: caps.zoom.max, step: caps.zoom.step || 0.1 });
+            // Start a little zoomed in by default — most retail barcodes
+            // benefit from it, and it's still adjustable from here.
+            const startZoom = Math.min(caps.zoom.max, caps.zoom.min + (caps.zoom.max - caps.zoom.min) * 0.25);
+            track.applyConstraints({ advanced: [{ zoom: startZoom }] }).then(() => setZoom(startZoom)).catch(() => {});
+          }
         } catch {
           setTorchSupported(false);
         }
@@ -4280,6 +4293,20 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
     }
   };
 
+  const stepZoom = async (e, dir) => {
+    e.stopPropagation(); // don't also trigger tapToFocus on the container
+    if (!zoomRange || zoom == null) return;
+    const next = Math.max(zoomRange.min, Math.min(zoomRange.max, zoom + dir * zoomRange.step * 5));
+    try {
+      const track = videoRef.current && videoRef.current.srcObject && videoRef.current.srcObject.getVideoTracks()[0];
+      if (!track) return;
+      await track.applyConstraints({ advanced: [{ zoom: next }] });
+      setZoom(next);
+    } catch {
+      // Ignore — device reported zoom support but rejected the constraint.
+    }
+  };
+
   return (
     <div className="relative rounded-2xl overflow-hidden bg-black" onClick={tapToFocus}>
       <video ref={videoRef} className="w-full block" style={{ minHeight: 220 }} muted playsInline />
@@ -4287,6 +4314,17 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
           just showing the user roughly where to aim, not a hard crop. */}
       {!error && (
         <div className="absolute inset-8 border-2 border-white/70 rounded-xl pointer-events-none" style={{ top: "35%", bottom: "35%" }} />
+      )}
+      {zoomRange && (
+        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-black/60 rounded-full px-1 py-1">
+          <button onClick={(e) => stepZoom(e, -1)} className="text-white w-8 h-8 rounded-full flex items-center justify-center text-lg font-bold">
+            −
+          </button>
+          <span className="text-white text-xs font-mono w-10 text-center">{zoom != null ? `${zoom.toFixed(1)}x` : ""}</span>
+          <button onClick={(e) => stepZoom(e, 1)} className="text-white w-8 h-8 rounded-full flex items-center justify-center text-lg font-bold">
+            +
+          </button>
+        </div>
       )}
       {torchSupported && (
         <button
@@ -4624,7 +4662,7 @@ function QiymetYoxlaBody() {
 const QEBUL_DRAFT_KEY = "zehra_qebul_draft";
 
 function MalQebuluBody() {
-  const { products, settings, suppliers, addPurchase } = useMarket();
+  const { products, settings, suppliers, addPurchase, loading } = useMarket();
   const [draft, setDraft] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem(QEBUL_DRAFT_KEY) || "null");
@@ -4765,7 +4803,13 @@ function MalQebuluBody() {
         </button>
       </div>
 
-      <BarcodeScannerView onDecode={handleDecode} />
+      {loading || products.length === 0 ? (
+        <div className="rounded-2xl bg-black/5 text-center py-16 text-sm text-gray-500 font-semibold">
+          Kataloq yüklənir...
+        </div>
+      ) : (
+        <BarcodeScannerView onDecode={handleDecode} />
+      )}
 
       {unknownKod && (
         <div className="mt-4">
@@ -4842,7 +4886,7 @@ const DUZELIS_SEBEBLERI = ["Tapıldı", "İtib", "Xarab olub", "Sayım fərqi", 
 // like Mal qəbulu/Sayım — there's nothing to reconcile against, it's just
 // "I found 5 more of these" or "2 of these went bad", one item at a time.
 function DuzelisBody() {
-  const { products, settings, adjustStockBy } = useMarket();
+  const { products, settings, adjustStockBy, loading } = useMarket();
   const [found, setFound] = useState(null);
   const [unknownKod, setUnknownKod] = useState(null);
   const [miqdar, setMiqdar] = useState("1");
@@ -4851,16 +4895,30 @@ function DuzelisBody() {
   const [msg, setMsg] = useState(null);
 
   const handleDecode = (code) => {
-    const { product } = resolveScannedProduct(code, products, settings);
+    const { product, gram } = resolveScannedProduct(code, products, settings);
     if (!product) {
       setUnknownKod(code);
       setFound(null);
       return;
     }
     setUnknownKod(null);
-    setFound(product);
-    setMiqdar("1");
-    setSebeb(DUZELIS_SEBEBLERI[0]);
+    const amount = gram != null ? round2(gram / 1000) : 1;
+    // Re-scanning the same product bumps the tally instead of resetting it
+    // back to 1 — matches how Stok sayımı already behaves, and is what
+    // "bir neçə dəfə oxutduqda sayı qalxsın" is asking for. A different
+    // product still starts a fresh tally at its own amount. Both state
+    // updates use the functional form since this callback is captured once
+    // when the scanner starts (its own effect only runs on mount) and would
+    // otherwise see stale `found`/`miqdar` from that first render.
+    setFound((prevFound) => {
+      const same = prevFound && prevFound.kod === product.kod;
+      setMiqdar((prevMiqdar) => {
+        const base = same ? Number(prevMiqdar) || 0 : 0;
+        return String(round2(base + amount));
+      });
+      if (!same) setSebeb(DUZELIS_SEBEBLERI[0]);
+      return product;
+    });
   };
 
   const apply = async (sign) => {
@@ -4881,7 +4939,13 @@ function DuzelisBody() {
 
   return (
     <>
-      <BarcodeScannerView onDecode={handleDecode} />
+      {loading || products.length === 0 ? (
+        <div className="rounded-2xl bg-black/5 text-center py-16 text-sm text-gray-500 font-semibold">
+          Kataloq yüklənir...
+        </div>
+      ) : (
+        <BarcodeScannerView onDecode={handleDecode} />
+      )}
 
       {unknownKod && (
         <div className="mt-4">
