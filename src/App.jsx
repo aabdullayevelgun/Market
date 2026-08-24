@@ -4,9 +4,11 @@ import {
   Receipt, History, XCircle, Banknote, CreditCard, Check,
   LayoutGrid, Package, Boxes, LineChart, FileBarChart2, Users, Truck,
   Settings, ChevronRight, Search, TrendingUp, AlertTriangle, Wallet, X, Download, Upload, Lock,
+  ClipboardList, Tag, Camera, Zap, ZapOff, Volume2, CheckCircle2,
 } from "lucide-react";
 import { BarChart, Bar, ResponsiveContainer, XAxis, Tooltip } from "recharts";
 import * as XLSX from "xlsx";
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
 
 /* ---------------------------------------------------------------- */
 /* Shared mock data                                                  */
@@ -120,6 +122,23 @@ const fmt = (n) => (n || 0).toLocaleString("az-AZ", { minimumFractionDigits: 2, 
 // compared against a typed amount, both sides need to go through this first.
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+// Shared scanned-barcode resolver: handles a plain product kod, and the
+// scale's 13-digit weight-embedded barcode (see handleScannedCode in
+// KassaView for the original of this logic) — anywhere a barcode is scanned
+// against the catalog (Kassa, Stok sayımı, Qiymət yoxla) needs both, since
+// weighed goods (KARTOF, SOGAN, etc.) only ever print the scale format.
+function resolveScannedProduct(code, products, settings) {
+  const prefix = (settings && settings.tereziPrefiks) || "22";
+  if (code.length === 13 && code.startsWith(prefix)) {
+    const tereziKodu = code.slice(2, 7);
+    const gram = parseInt(code.slice(7, 12), 10);
+    const product = products.find((p) => p.tereziKodu === tereziKodu);
+    return product && !isNaN(gram) ? { product, gram } : { product: null, gram: null };
+  }
+  const product = products.find((p) => p.kod === code);
+  return { product, gram: null };
+}
+
 // Small icon for "Barkodu yoxdur" quick-add items (fresh bread, eggs, etc.),
 // guessed from keywords in the product name. Purely cosmetic — falls back to
 // a generic box icon when nothing matches.
@@ -217,6 +236,7 @@ const emptyState = { products: [], sales: [], employees: [], suppliers: [], stoc
 
 const PENDING_SALES_KEY = "zehra_pending_sales";
 const PENDING_STOCK_KEY = "zehra_pending_stock";
+const PENDING_COUNT_KEY = "zehra_pending_sayim";
 // Everything, but only the RECENT slice of sales — a full year of receipts
 // can be many MB (this store's whole history alone was ~10MB) and a Kassa
 // PC only ever needs to browse recent checks while offline, not the entire
@@ -255,7 +275,7 @@ function saveCachedCatalog(data) {
   }
 }
 
-function MarketProvider({ children, serverUrl, token = "" }) {
+function MarketProvider({ children, serverUrl, token = "", initialAdminPw = "" }) {
   const [state, setState] = useState(loadCachedCatalog);
   const [connected, setConnected] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -294,11 +314,30 @@ function MarketProvider({ children, serverUrl, token = "" }) {
     localStorage.setItem(PENDING_STOCK_KEY, JSON.stringify(list));
   };
 
+  // A "Stok sayımı" confirm made from a phone with a weak warehouse signal
+  // shouldn't lose the count — same queue-and-replay approach as sales and
+  // single stock adjustments above, but batched (one whole count session per
+  // queue entry) since that's how /api/stock/count expects it.
+  const [pendingCounts, setPendingCounts] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(PENDING_COUNT_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
+  const pendingCountsRef = React.useRef(pendingCounts);
+  pendingCountsRef.current = pendingCounts;
+
+  const persistPendingCounts = (list) => {
+    setPendingCounts(list);
+    localStorage.setItem(PENDING_COUNT_KEY, JSON.stringify(list));
+  };
+
   // Set only after the Admin-panel password prompt is passed (see Inner/
   // submitPw). Kept in memory only, never persisted — sent alongside the
   // shared LAN token so the server can enforce admin-only routes itself,
   // instead of trusting the client not to call them.
-  const [adminPw, setAdminPw] = useState("");
+  const [adminPw, setAdminPw] = useState(initialAdminPw);
   const authHeaders = () => ({
     ...(token ? { "x-api-token": token } : {}),
     ...(adminPw ? { "x-admin-password": adminPw } : {}),
@@ -380,6 +419,24 @@ function MarketProvider({ children, serverUrl, token = "" }) {
     }));
     return true;
   };
+  // Optimistically sets every counted product's stok locally right away —
+  // same reasoning as adjustStockBy above — then queues for retry if the
+  // batch itself couldn't reach the server (e.g. a phone in a weak-signal
+  // corner of the warehouse).
+  const confirmStockCount = async (items) => {
+    const ok = await call("POST", "/api/stock/count", { items });
+    if (ok) return true;
+    persistPendingCounts([...pendingCountsRef.current, { items }]);
+    setState((s) => ({
+      ...s,
+      products: s.products.map((p) => {
+        const item = items.find((it) => it.kod === p.kod);
+        return item ? { ...p, stok: item.sayilan } : p;
+      }),
+    }));
+    return true;
+  };
+
   const deleteProduct = (kod) => call("DELETE", `/api/products/${encodeURIComponent(kod)}`);
   const adjustStock = (kod, newStok) => updateProduct(kod, { stok: newStok });
   const addSupplier = (s) => call("POST", "/api/suppliers", s);
@@ -432,6 +489,23 @@ function MarketProvider({ children, serverUrl, token = "" }) {
       cancelled = true;
     };
   }, [connected]);
+
+  React.useEffect(() => {
+    if (!connected || pendingCountsRef.current.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const remaining = [...pendingCountsRef.current];
+      while (remaining.length > 0 && !cancelled) {
+        const ok = await call("POST", "/api/stock/count", remaining[0]);
+        if (!ok) break; // still can't reach the server — stop, retry on next reconnect
+        remaining.shift();
+        persistPendingCounts(remaining);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [connected]);
   const addPurchase = (payload) => call("POST", "/api/purchases", payload);
   const setSettings = (s) => call("PUT", "/api/settings", s);
   const restoreBackup = (data) => call("POST", "/api/restore", data);
@@ -450,8 +524,9 @@ function MarketProvider({ children, serverUrl, token = "" }) {
     sales: [...pendingSales.map((s) => ({ ...s, _pending: true })), ...state.sales],
     pendingCount: pendingSales.length,
     pendingStockCount: pendingStock.length,
+    pendingSayimCount: pendingCounts.length,
     connected, loading,
-    addProduct, updateProduct, deleteProduct, adjustStock, adjustStockBy, returnSale,
+    addProduct, updateProduct, deleteProduct, adjustStock, adjustStockBy, returnSale, confirmStockCount,
     addSupplier, updateSupplier, deleteSupplier, addEmployee, deleteEmployee, addSale, addPurchase, setSettings, restoreBackup,
     importProducts, resetSales, setAdminPw, adminPw,
   };
@@ -470,27 +545,36 @@ function useDeviceRole() {
     () => localStorage.getItem("zehra_server_url") || "http://127.0.0.1:4000"
   );
   const [token, setTokenState] = useState(() => localStorage.getItem("zehra_token") || "");
-  const setRole = (r, url, tok) => {
+  // Only used by the "scanner" (Telefon) role — remembered locally so the
+  // phone doesn't have to re-enter the admin password every time it's
+  // picked back up mid-shift. Stock-count confirms are admin-gated
+  // server-side the same way Mal qəbulu/Stok already are.
+  const [scannerPw, setScannerPwState] = useState(() => localStorage.getItem("zehra_scanner_pw") || "");
+  const setRole = (r, url, tok, pw) => {
     localStorage.setItem("zehra_role", r);
     localStorage.setItem("zehra_server_url", url);
     localStorage.setItem("zehra_token", tok || "");
+    if (pw != null) localStorage.setItem("zehra_scanner_pw", pw);
     setRoleState(r);
     setServerUrlState(url);
     setTokenState(tok || "");
+    if (pw != null) setScannerPwState(pw);
   };
   const reset = () => {
     localStorage.removeItem("zehra_role");
     localStorage.removeItem("zehra_server_url");
     localStorage.removeItem("zehra_token");
+    localStorage.removeItem("zehra_scanner_pw");
     setRoleState("");
   };
-  return { role, serverUrl, token, setRole, reset };
+  return { role, serverUrl, token, scannerPw, setRole, reset };
 }
 
 function RoleSetup({ onDone }) {
-  const [step, setStep] = useState("choose"); // choose | admin-ip | kassa-ip
+  const [step, setStep] = useState("choose"); // choose | admin-ip | kassa-ip | scanner-ip
   const [ip, setIp] = useState("");
   const [tokenInput, setTokenInput] = useState("");
+  const [pwInput, setPwInput] = useState("");
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState("");
   const [adminIp, setAdminIp] = useState(null);
@@ -526,6 +610,30 @@ function RoleSetup({ onDone }) {
     }
   };
 
+  // Telefon (Skaner) also just needs the LAN token to read the catalog —
+  // the admin password is only asked here so it can be sent along with the
+  // stock-count confirms, which are admin-gated the same as Mal qəbulu.
+  const connectScanner = async () => {
+    // https, and the +443 port — see getOrCreateHttpsCert's comment in
+    // server/index.js for why the scanner role needs its own HTTPS listener
+    // (camera access requires a secure context; plain http://<lan-ip> can't
+    // grant it, no matter what the phone's permission prompt says).
+    const url = `https://${ip.trim()}:4443`;
+    setTesting(true);
+    setTestError("");
+    try {
+      const res = await fetch(`${url}/api/ping`);
+      if (!res.ok) throw new Error();
+      const stateRes = await fetch(`${url}/api/state`, { headers: { "x-api-token": tokenInput.trim() } });
+      if (!stateRes.ok) throw new Error("token");
+      onDone("scanner", url, tokenInput.trim(), pwInput);
+    } catch {
+      setTestError("Qoşulmaq mümkün olmadı. Bu telefonda əvvəlcə https ünvanını açıb sertifikat xəbərdarlığını qəbul etdiyindən, IP/tokenin doğru olduğundan və Admin kompüterinin açıq olduğundan əmin olun.");
+    } finally {
+      setTesting(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#f4f6f5] flex items-center justify-center p-6">
       <div className="bg-white rounded-3xl shadow-lg border border-gray-200 p-8 w-full max-w-md">
@@ -555,6 +663,15 @@ function RoleSetup({ onDone }) {
                 <div className="font-bold">KASSA (yalnız satış)</div>
                 <div className="text-xs text-gray-500 mt-1">
                   Bu kompüter Admin kompüterinə şəbəkə üzərindən qoşulacaq, öz məlumatını saxlamayacaq.
+                </div>
+              </button>
+              <button
+                onClick={() => setStep("scanner-ip")}
+                className="w-full border-2 border-gray-200 rounded-2xl p-4 text-left hover:border-gray-300"
+              >
+                <div className="font-bold flex items-center gap-2">📱 TELEFON (Skaner)</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  Bu telefonun kamerası əl barkod terminalı kimi işləyəcək — stok sayımı və qiymət yoxlama üçün.
                 </div>
               </button>
             </div>
@@ -615,6 +732,51 @@ function RoleSetup({ onDone }) {
               </button>
               <button
                 onClick={connectKassa}
+                disabled={!ip.trim() || !tokenInput.trim() || testing}
+                className="flex-[2] bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl py-2.5 font-bold text-sm"
+              >
+                {testing ? "Yoxlanılır..." : "Qoşul"}
+              </button>
+            </div>
+          </>
+        )}
+        {step === "scanner-ip" && (
+          <>
+            <div className="text-center mb-6">
+              <div className="font-black text-lg">Admin kompüterinin IP ünvanı</div>
+              <div className="text-sm text-gray-400 mt-1">
+                Admin kompüterini açanda ona bu ünvan göstərilir (rol seçimindən sonra).
+              </div>
+            </div>
+            {typeof window !== "undefined" && !window.isSecureContext && (
+              <div className="bg-amber-50 border-2 border-amber-200 rounded-2xl p-4 mb-4 text-sm text-amber-800">
+                <b>Vacib:</b> kamera yalnız <code className="font-mono">https</code> ünvanından işləyir. Bu telefonun brauzerində əvvəlcə{" "}
+                <b>https://{"<Admin IP>"}:4443</b> ünvanını açın (aşağıdakı IP-ni yazandan sonra sertifikat xəbərdarlığı çıxsa "Davam et / Advanced → Proceed" seçin), sonra bu addımı təkrarlayın.
+              </div>
+            )}
+            <div className="space-y-3">
+              <FormField label="IP ünvanı" placeholder="məs. 192.168.1.15" value={ip} onChange={(e) => setIp(e.target.value)} />
+              <FormField
+                label="Token"
+                placeholder="Admin ekranında göstərilən kod"
+                value={tokenInput}
+                onChange={(e) => setTokenInput(e.target.value.toUpperCase())}
+              />
+              <FormField
+                label="Admin şifrəsi"
+                type="password"
+                placeholder="Sayımı təsdiqləmək üçün lazımdır"
+                value={pwInput}
+                onChange={(e) => setPwInput(e.target.value)}
+              />
+            </div>
+            {testError && <div className="text-red-500 text-xs font-semibold mt-2">{testError}</div>}
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setStep("choose")} className="flex-1 py-2.5 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
+                Geri
+              </button>
+              <button
+                onClick={connectScanner}
                 disabled={!ip.trim() || !tokenInput.trim() || testing}
                 className="flex-[2] bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl py-2.5 font-bold text-sm"
               >
@@ -1869,6 +2031,8 @@ const NAV = [
   { key: "icmal", label: "İcmal", icon: LayoutGrid },
   { key: "mehsullar", label: "Məhsullar", icon: Package },
   { key: "stok", label: "Stok", icon: Boxes },
+  { key: "sayim", label: "Stok sayımı", icon: ClipboardList },
+  { key: "qiymetyoxla", label: "Qiymət yoxla", icon: Tag },
   { key: "satislar", label: "Satışlar", icon: LineChart },
   { key: "hesabatlar", label: "Hesabatlar", icon: FileBarChart2 },
   { key: "isciler", label: "İşçilər", icon: Users },
@@ -3927,6 +4091,441 @@ function TereziPage() {
   );
 }
 
+/* ---------------------------------------------------------------- */
+/* MOBILE BARCODE SCANNER MODULE                                     */
+/* Turns any phone's camera (or a laptop's webcam) into a continuous  */
+/* barcode reader for two purposes: physical stock counting, and a    */
+/* quick customer-facing price lookup. Shares one scanner component.  */
+/* ---------------------------------------------------------------- */
+
+// A short synthesized beep (no audio file to ship/load) — confirms a scan
+// landed without the user having to watch the screen.
+function playBeep() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = 1400;
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.12);
+    osc.onended = () => ctx.close();
+  } catch {
+    // Web Audio unsupported/blocked — silently skip the beep, the scan itself still works.
+  }
+}
+
+const BARCODE_FORMATS = [
+  Html5QrcodeSupportedFormats.EAN_13,
+  Html5QrcodeSupportedFormats.EAN_8,
+  Html5QrcodeSupportedFormats.UPC_A,
+  Html5QrcodeSupportedFormats.UPC_E,
+  Html5QrcodeSupportedFormats.CODE_128,
+  Html5QrcodeSupportedFormats.CODE_39,
+  Html5QrcodeSupportedFormats.CODABAR,
+  Html5QrcodeSupportedFormats.ITF,
+];
+
+// Continuous camera scanning: stays open across scans (the whole point —
+// "oxut, nəticəni gör, növbətini oxut" with no button between them), debounces
+// the same code firing repeatedly while it's still in frame, and beeps +
+// vibrates on every accepted decode. `onDecode` is called with the raw text.
+function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
+  const regionIdRef = React.useRef(`barcode-scanner-${Math.random().toString(36).slice(2)}`);
+  const scannerRef = React.useRef(null);
+  const lastRef = React.useRef({ code: "", time: 0 });
+  const [torchOn, setTorchOn] = useState(false);
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [error, setError] = useState("");
+
+  React.useEffect(() => {
+    let cancelled = false;
+    let started = false;
+    const html5QrCode = new Html5Qrcode(regionIdRef.current, {
+      formatsToSupport: BARCODE_FORMATS,
+      verbose: false,
+    });
+    scannerRef.current = html5QrCode;
+
+    html5QrCode
+      .start(
+        { facingMode: "environment" },
+        { fps: 12, qrbox: { width: 280, height: 160 }, disableFlip: true },
+        (decodedText) => {
+          const now = Date.now();
+          if (decodedText === lastRef.current.code && now - lastRef.current.time < rescanDelayMs) return;
+          lastRef.current = { code: decodedText, time: now };
+          playBeep();
+          if (navigator.vibrate) navigator.vibrate(70);
+          onDecode(decodedText);
+        },
+        () => {} // per-frame "nothing decoded yet" noise — expected on every frame without a code, not an error
+      )
+      .then(() => {
+        if (cancelled) {
+          // Unmounted (e.g. user navigated away) before the camera actually
+          // finished opening — html5-qrcode has no "start still pending"
+          // cancel, so just stop it immediately instead of leaving the
+          // camera light on with nothing listening for the cleanup below.
+          html5QrCode.stop().catch(() => {});
+          return;
+        }
+        started = true;
+        try {
+          const caps = html5QrCode.getRunningTrackCameraCapabilities();
+          setTorchSupported(!!(caps && caps.torchFeature && caps.torchFeature().isSupported()));
+        } catch {
+          setTorchSupported(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setError("Kameraya çıxış alınmadı — brauzerdən kamera icazəsini yoxlayın.");
+      });
+
+    return () => {
+      cancelled = true;
+      // .stop() throws synchronously (not a rejected promise) when the
+      // scanner never successfully started — e.g. permission denied, or
+      // unmounted before start() resolved — so this must be a try/catch,
+      // not a .catch() on the call.
+      if (started) {
+        try {
+          html5QrCode.stop().then(() => html5QrCode.clear()).catch(() => {});
+        } catch {}
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggleTorch = async () => {
+    if (!scannerRef.current) return;
+    try {
+      await scannerRef.current.applyVideoConstraints({ advanced: [{ torch: !torchOn }] });
+      setTorchOn((t) => !t);
+    } catch {
+      // Device/browser doesn't actually support torch control despite reporting it — ignore.
+    }
+  };
+
+  return (
+    <div className="relative rounded-2xl overflow-hidden bg-black">
+      <div id={regionIdRef.current} className="w-full [&_video]:w-full [&_video]:object-cover" style={{ minHeight: 220 }} />
+      {torchSupported && (
+        <button
+          onClick={toggleTorch}
+          className="absolute top-3 right-3 bg-black/60 text-white p-2.5 rounded-full"
+          title="Fənər"
+        >
+          {torchOn ? <ZapOff size={18} /> : <Zap size={18} />}
+        </button>
+      )}
+      {error && (
+        <div className="absolute inset-0 bg-black/80 flex items-center justify-center p-4 text-center text-white text-sm font-semibold">
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Quick inline "bu barkod bazada yoxdur" add-product form — deliberately
+// minimal (ad + kateqoriya + qiymətlər), reachable straight from a failed
+// scan instead of forcing a detour through Məhsullar.
+function UnknownBarcodeCard({ kod, onAdded, onDismiss }) {
+  const { addProduct } = useMarket();
+  const [ad, setAd] = useState("");
+  const [satish, setSatish] = useState("");
+  const [alish, setAlish] = useState("");
+  const [stok, setStok] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!ad.trim()) return;
+    setSaving(true);
+    await addProduct({
+      kod,
+      ad: ad.trim(),
+      kat: "Digər",
+      alish: parseFloat(alish) || 0,
+      satish: parseFloat(satish) || 0,
+      endirim: 0,
+      stok: parseInt(stok, 10) || 0,
+      minimum: 10,
+      novu: "eded",
+      vahid: "ədəd",
+      tereziKodu: "",
+    });
+    setSaving(false);
+    onAdded();
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-red-200 p-4 space-y-3">
+      <div className="text-red-600 font-semibold text-sm">Bu barkoda uyğun məhsul tapılmadı.</div>
+      <div className="text-xs text-gray-400 font-mono">{kod}</div>
+      <FormField label="Məhsul adı" value={ad} onChange={(e) => setAd(e.target.value)} autoFocus />
+      <div className="grid grid-cols-3 gap-2">
+        <FormField label="Alış" type="number" value={alish} onChange={(e) => setAlish(e.target.value)} />
+        <FormField label="Satış" type="number" value={satish} onChange={(e) => setSatish(e.target.value)} />
+        <FormField label="Stok" type="number" value={stok} onChange={(e) => setStok(e.target.value)} />
+      </div>
+      <div className="flex gap-2">
+        <button onClick={onDismiss} className="flex-1 py-2 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
+          Bağla
+        </button>
+        <button
+          onClick={save}
+          disabled={!ad.trim() || saving}
+          className="flex-[2] bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl py-2 font-bold text-sm"
+        >
+          {saving ? "Saxlanılır..." : "Yeni məhsul əlavə et"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// "Stok sayımı" — walk the shelves, scan every product once per unit seen;
+// repeat scans of the same barcode just bump its tally instead of adding a
+// new row. Nothing touches the real stok until "Təsdiqlə" — up to then it's
+// a purely local tally, so a half-finished count survives a page reload.
+const SAYIM_DRAFT_KEY = "zehra_sayim_draft";
+
+function StokSayimiPage() {
+  return (
+    <div className="max-w-md mx-auto">
+      <PageHeader title="Stok sayımı" />
+      <StokSayimiBody />
+    </div>
+  );
+}
+
+// The actual scanning UI — split out from StokSayimiPage so the standalone
+// mobile "Telefon (Skaner)" role (see TelefonSkanerApp) can reuse it with
+// its own header/chrome instead of the desktop admin PageHeader.
+function StokSayimiBody() {
+  const { products, settings, confirmStockCount, pendingSayimCount } = useMarket();
+  const [rows, setRows] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(SAYIM_DRAFT_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
+  const [unknownKod, setUnknownKod] = useState(null);
+  const [lastScanned, setLastScanned] = useState(null);
+  const [confirming, setConfirming] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  // A weighed item's scale barcode carries its own weight (grams) — that
+  // adds to the tally in kg, not as "+1 ədəd" the way a piece-counted
+  // product's plain barcode does.
+  const addOrBumpRow = (product, kgAmount) => {
+    const amount = kgAmount != null ? kgAmount : 1;
+    setRows((prev) => {
+      const i = prev.findIndex((r) => r.kod === product.kod);
+      const next =
+        i >= 0
+          ? prev.map((r, idx) => (idx === i ? { ...r, sayilan: round2(r.sayilan + amount) } : r))
+          : [{ kod: product.kod, ad: product.ad, movcudStok: product.stok, sayilan: amount }, ...prev];
+      localStorage.setItem(SAYIM_DRAFT_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const removeRow = (kod) => {
+    setRows((prev) => {
+      const next = prev.filter((r) => r.kod !== kod);
+      localStorage.setItem(SAYIM_DRAFT_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const totalTypes = rows.length;
+  const totalCount = rows.reduce((s, r) => s + r.sayilan, 0);
+
+  const confirm = async () => {
+    if (rows.length === 0) return;
+    setConfirming(true);
+    const ok = await confirmStockCount(rows.map((r) => ({ kod: r.kod, sayilan: r.sayilan })));
+    setConfirming(false);
+    if (ok) {
+      setRows([]);
+      localStorage.removeItem(SAYIM_DRAFT_KEY);
+      setLastScanned(null);
+      setMsg({ text: "Sayım təsdiqləndi və stoka yazıldı.", isError: false });
+    } else {
+      setMsg({ text: "Yadda saxlanmadı — serverlə əlaqəni yoxlayın.", isError: true });
+    }
+    setTimeout(() => setMsg(null), 4000);
+  };
+
+  return (
+    <>
+      {pendingSayimCount > 0 && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs font-semibold rounded-xl px-3 py-2 mb-3">
+          {pendingSayimCount} sayım hələ serverə göndərilməyib — əlaqə bərpa olunanda avtomatik göndəriləcək.
+        </div>
+      )}
+      <BarcodeScannerView
+        onDecode={(code) => {
+          const { product, gram } = resolveScannedProduct(code, products, settings);
+          if (!product) {
+            setUnknownKod(code);
+            setLastScanned(null);
+            return;
+          }
+          setUnknownKod(null);
+          setLastScanned(product);
+          addOrBumpRow(product, gram != null ? gram / 1000 : null);
+        }}
+      />
+
+      {unknownKod && (
+        <div className="mt-4">
+          <UnknownBarcodeCard kod={unknownKod} onDismiss={() => setUnknownKod(null)} onAdded={() => setUnknownKod(null)} />
+        </div>
+      )}
+
+      {lastScanned && !unknownKod && (
+        <div className="mt-4 bg-white rounded-2xl border border-green-200 p-4">
+          <div className="flex items-center gap-2 text-green-600 font-semibold text-sm mb-2">
+            <CheckCircle2 size={16} /> Oxundu
+          </div>
+          <div className="font-bold text-lg leading-tight">{lastScanned.ad}</div>
+          <div className="text-xs text-gray-400 font-mono mb-2">{lastScanned.kod}</div>
+          <div className="flex justify-between text-sm">
+            <span className="text-gray-500">Mövcud stok</span>
+            <span className="font-semibold">{lastScanned.stok}</span>
+          </div>
+          <div className="flex justify-between text-sm">
+            <span className="text-gray-500">Sayım</span>
+            <span className="font-bold text-green-700">
+              {rows.find((r) => r.kod === lastScanned.kod)?.sayilan ?? 1}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {msg && (
+        <div className={`mt-4 text-sm font-semibold rounded-xl px-3 py-2 ${msg.isError ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}>
+          {msg.text}
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div className="mt-4 bg-white rounded-2xl border border-gray-200 overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-gray-100 font-bold text-xs text-gray-500">SAYIM SİYAHISI</div>
+          <div className="max-h-64 overflow-y-auto">
+            {rows.map((r) => (
+              <div key={r.kod} className="flex items-center justify-between px-4 py-2.5 border-t border-gray-50 text-sm">
+                <div className="min-w-0">
+                  <div className="font-medium truncate">{r.ad}</div>
+                  <div className="text-[10px] text-gray-400">Mövcud: {r.movcudStok}</div>
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <span className="font-bold text-green-700">{r.sayilan}</span>
+                  <button onClick={() => removeRow(r.kod)} className="text-gray-300 hover:text-red-500">
+                    <XCircle size={16} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="px-4 py-3 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500">
+            <span>Ümumi məhsul növü: <b className="text-gray-700">{totalTypes}</b></span>
+            <span>Ümumi say: <b className="text-gray-700">{totalCount}</b></span>
+          </div>
+          <div className="px-4 pb-4">
+            <button
+              onClick={confirm}
+              disabled={confirming}
+              className="w-full bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl py-3 font-bold text-sm"
+            >
+              {confirming ? "Göndərilir..." : "TƏSDİQLƏ"}
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// "Qiymət yoxla" — camera stays open, each scan just replaces the price
+// card on screen so a customer/employee can walk down items one after
+// another without touching the phone between scans.
+function QiymetYoxlaPage() {
+  return (
+    <div className="max-w-md mx-auto">
+      <PageHeader title="Qiymət yoxla" />
+      <QiymetYoxlaBody />
+    </div>
+  );
+}
+
+// Split out for the same reason as StokSayimiBody above.
+function QiymetYoxlaBody() {
+  const { products, settings } = useMarket();
+  const [found, setFound] = useState(null);
+  const [unknownKod, setUnknownKod] = useState(null);
+
+  const handleDecode = (code) => {
+    const { product } = resolveScannedProduct(code, products, settings);
+    if (!product) {
+      setUnknownKod(code);
+      setFound(null);
+      return;
+    }
+    setUnknownKod(null);
+    setFound(product);
+  };
+
+  const endirimli = found && found.endirim > 0 ? round2(found.satish * (1 - found.endirim / 100)) : null;
+
+  return (
+    <>
+      <BarcodeScannerView onDecode={handleDecode} />
+
+      {unknownKod && (
+        <div className="mt-4">
+          <UnknownBarcodeCard kod={unknownKod} onDismiss={() => setUnknownKod(null)} onAdded={() => setUnknownKod(null)} />
+        </div>
+      )}
+
+      {found && !unknownKod && (
+        <div className="mt-4 bg-white rounded-2xl border border-gray-200 p-6 text-center">
+          <div className="w-16 h-16 rounded-2xl bg-green-50 text-green-600 flex items-center justify-center mx-auto mb-3">
+            <Package size={28} />
+          </div>
+          <div className="font-bold text-xl leading-tight mb-1">{found.ad}</div>
+          <div className="text-xs text-gray-400 font-mono mb-4">{found.kod}</div>
+          {endirimli != null ? (
+            <>
+              <div className="text-gray-400 line-through text-lg">{fmt(found.satish)} ₼</div>
+              <div className="text-4xl font-extrabold text-green-600 my-1">{fmt(endirimli)} ₼</div>
+              <div className="text-xs font-semibold text-amber-600 mb-3">Endirim: {found.endirim}%</div>
+            </>
+          ) : (
+            <div className="text-4xl font-extrabold text-green-600 my-2">{fmt(found.satish)} ₼</div>
+          )}
+          <div className="text-sm text-gray-500">
+            Stok: <span className="font-semibold text-gray-700">{found.stok} {found.vahid || "ədəd"}</span>
+          </div>
+        </div>
+      )}
+
+      {!found && !unknownKod && (
+        <div className="mt-4 text-center text-sm text-gray-400 py-8">Qiyməti görmək üçün barkodu kameraya göstərin.</div>
+      )}
+    </>
+  );
+}
+
 function BackupPage() {
   const { products, sales, employees, suppliers, stockMovements, purchases, settings, setSettings, restoreBackup } = useMarket();
   const [restoring, setRestoring] = useState(false);
@@ -4230,6 +4829,8 @@ const PAGES = {
   icmal: IcmalPage,
   mehsullar: MehsullarPage,
   stok: StokPage,
+  sayim: StokSayimiPage,
+  qiymetyoxla: QiymetYoxlaPage,
   satislar: SatislarPage,
   hesabatlar: HesabatlarPage,
   isciler: IscilerPage,
@@ -4330,6 +4931,109 @@ function MainApp({ role, serverUrl, token, onResetRole }) {
   );
 }
 
+/* ---------------------------------------------------------------- */
+/* TELEFON (SKANER) — a dedicated, phone-only entry point. None of the */
+/* desktop admin chrome (sidebar, other pages) ships here — just a    */
+/* glossy header, a segmented Sayım/Qiymət switch, and the scanner.   */
+/* ---------------------------------------------------------------- */
+
+function TelefonSkanerShell({ onResetRole }) {
+  const { connected, pendingSayimCount } = useMarket();
+  const [tab, setTab] = useState("sayim");
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-[#0f2e1c] via-[#0c1f15] to-[#0a1712] text-white">
+      <div className="max-w-md mx-auto px-4 pt-5 pb-8">
+        {/* Glossy header card */}
+        <div
+          className="rounded-3xl p-5 mb-4 relative overflow-hidden"
+          style={{
+            background: "linear-gradient(145deg, #1d8a4c 0%, #146538 55%, #0c4526 100%)",
+            boxShadow: "0 14px 30px -10px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.15)",
+          }}
+        >
+          <div
+            className="absolute -top-10 -right-10 w-32 h-32 rounded-full opacity-30"
+            style={{ background: "radial-gradient(circle, rgba(255,255,255,0.5), transparent 70%)" }}
+          />
+          <div className="flex items-center justify-between relative">
+            <div className="flex items-center gap-2.5">
+              <div
+                className="w-10 h-10 rounded-2xl bg-white/15 flex items-center justify-center backdrop-blur"
+                style={{ boxShadow: "inset 0 1px 1px rgba(255,255,255,0.4), 0 4px 10px rgba(0,0,0,0.3)" }}
+              >
+                <ScanBarcode size={20} />
+              </div>
+              <div>
+                <div className="font-black text-lg leading-tight">Zəhra Skaner</div>
+                <div className="text-[11px] text-white/60 flex items-center gap-1.5">
+                  <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-green-300" : "bg-red-400"}`} />
+                  {connected ? "Qoşulu" : "Əlaqə yoxdur"}
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={onResetRole}
+              className="text-white/50 hover:text-white/80 text-[11px] font-semibold border border-white/15 rounded-full px-3 py-1.5"
+            >
+              Çıx
+            </button>
+          </div>
+        </div>
+
+        {pendingSayimCount > 0 && (
+          <div className="bg-amber-400/15 border border-amber-300/30 text-amber-200 text-xs font-semibold rounded-2xl px-4 py-2.5 mb-4">
+            ⏳ {pendingSayimCount} sayım hələ göndərilməyib — əlaqə bərpa olunanda avtomatik gedəcək.
+          </div>
+        )}
+
+        {/* Segmented tab switch — raised "3D" pill */}
+        <div
+          className="grid grid-cols-2 gap-1 p-1.5 rounded-2xl mb-5"
+          style={{ background: "rgba(0,0,0,0.35)", boxShadow: "inset 0 2px 6px rgba(0,0,0,0.5)" }}
+        >
+          {[
+            { key: "sayim", label: "Stok sayımı", icon: ClipboardList },
+            { key: "qiymet", label: "Qiymət yoxla", icon: Tag },
+          ].map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className={`flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold transition-all ${
+                tab === key ? "text-[#0c4526]" : "text-white/50"
+              }`}
+              style={
+                tab === key
+                  ? { background: "linear-gradient(180deg, #ffffff, #dff5e6)", boxShadow: "0 6px 14px -4px rgba(0,0,0,0.5)" }
+                  : {}
+              }
+            >
+              <Icon size={16} /> {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Content card — the scanner + results sit on a light "glass" card
+            so the dark chrome around it reads as depth, not just a flat bg */}
+        <div
+          className="bg-[#f4f6f5] text-[#1a2b22] rounded-3xl p-4"
+          style={{ boxShadow: "0 20px 40px -15px rgba(0,0,0,0.6)" }}
+        >
+          {tab === "sayim" ? <StokSayimiBody /> : <QiymetYoxlaBody />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TelefonSkanerApp({ serverUrl, token, adminPw, onResetRole }) {
+  return (
+    <MarketProvider serverUrl={serverUrl} token={token} initialAdminPw={adminPw}>
+      <TelefonSkanerShell onResetRole={onResetRole} />
+    </MarketProvider>
+  );
+}
+
 function Inner({ role, app, setApp, onResetRole }) {
   const { connected, settings, pendingCount, pendingStockCount, setAdminPw } = useMarket();
   const [pwOpen, setPwOpen] = useState(false);
@@ -4413,9 +5117,12 @@ function Inner({ role, app, setApp, onResetRole }) {
 }
 
 export default function App() {
-  const { role, serverUrl, token, setRole, reset } = useDeviceRole();
+  const { role, serverUrl, token, scannerPw, setRole, reset } = useDeviceRole();
   if (!role) {
-    return <RoleSetup onDone={(r, url, tok) => setRole(r, url, tok)} />;
+    return <RoleSetup onDone={(r, url, tok, pw) => setRole(r, url, tok, pw)} />;
+  }
+  if (role === "scanner") {
+    return <TelefonSkanerApp serverUrl={serverUrl} token={token} adminPw={scannerPw} onResetRole={reset} />;
   }
   return <MainApp role={role} serverUrl={serverUrl} token={token} onResetRole={reset} />;
 }

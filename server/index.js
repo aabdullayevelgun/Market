@@ -8,9 +8,53 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const https = require("https");
 
 function generateToken() {
   return crypto.randomBytes(16).toString("hex").toUpperCase();
+}
+
+// A phone's browser will not grant camera access (getUserMedia) on a plain
+// http://<lan-ip> page — only "secure contexts" (https:, or http://localhost)
+// are allowed to ask, regardless of what the user taps on the permission
+// prompt. The Admin/Kassa desktop traffic on the main HTTP port doesn't need
+// this (no camera involved there), so instead of moving the whole app to
+// HTTPS — which would touch every hardcoded http://127.0.0.1:4000 call in
+// the Electron/client code — a second HTTPS listener is added on its own
+// port, serving the exact same Express app, just for the "Telefon (Skaner)"
+// role to connect through. Cached to disk so the cert doesn't regenerate
+// (and force the phone to re-accept the self-signed warning) every restart.
+// selfsigned@5's generate() is async (returns a Promise) — this whole
+// function has to be too.
+async function getOrCreateHttpsCert(userDataDir) {
+  const keyFile = path.join(userDataDir, "https-key.pem");
+  const certFile = path.join(userDataDir, "https-cert.pem");
+  if (fs.existsSync(keyFile) && fs.existsSync(certFile)) {
+    return { key: fs.readFileSync(keyFile), cert: fs.readFileSync(certFile) };
+  }
+  const selfsigned = require("selfsigned");
+  const attrs = [{ name: "commonName", value: "zehra-market.local" }];
+  // Browsers validate the SAN strictly for IP connections — a CN or a
+  // wildcard DNS entry isn't enough. Covers every private LAN range this
+  // could plausibly be running on (the shop's actual DHCP-assigned IP is
+  // unknown at cert-generation time), plus the real current IP and
+  // loopback for good measure.
+  const altNames = [
+    { type: 7, ip: "127.0.0.1" },
+    { type: 2, value: "localhost" },
+    { type: 2, value: "zehra-market.local" },
+  ];
+  const currentIp = getLocalIp();
+  if (currentIp) altNames.push({ type: 7, ip: currentIp });
+  const pems = await selfsigned.generate(attrs, {
+    days: 3650,
+    keySize: 2048,
+    extensions: [{ name: "subjectAltName", altNames }],
+  });
+  fs.mkdirSync(userDataDir, { recursive: true });
+  fs.writeFileSync(keyFile, pems.private);
+  fs.writeFileSync(certFile, pems.cert);
+  return { key: pems.private, cert: pems.cert };
 }
 
 function isLocalRequest(req) {
@@ -234,15 +278,25 @@ function startServer(userDataDir, port = 4000, onError) {
   });
 
   // The Admin PC talks to its own server over localhost and is always trusted.
-  // Any other computer on the network (a Kassa PC) must present the shared
-  // token so a stranger on the same Wi-Fi can't read or edit the store data.
+  // Any other computer on the network (a Kassa PC, or a phone used as a
+  // barcode scanner) must present the shared token so a stranger on the same
+  // Wi-Fi can't read or edit the store data. Only /api/* is gated — the
+  // static app files below (index.html, JS, CSS) must load token-free, or a
+  // phone could never reach the RoleSetup screen where the token is entered
+  // in the first place.
   app.use((req, res, next) => {
-    if (req.path === "/api/ping" || isLocalRequest(req)) return next();
+    if (!req.path.startsWith("/api/") || req.path === "/api/ping" || isLocalRequest(req)) return next();
     const data = loadData(dataFile);
     const token = req.header("x-api-token");
     if (token && token === data.settings.apiToken) return next();
     res.status(401).json({ error: "Yanlış və ya boş token." });
   });
+
+  // Lets a phone on the same LAN open http://<admin-ip>:4000 directly in its
+  // browser and get the same app a Kassa PC uses — this is what makes "use
+  // your phone as a barcode scanner" possible at all, since otherwise only
+  // the packaged Electron window could ever load the UI.
+  app.use(express.static(path.join(__dirname, "../dist")));
 
   app.get("/api/ping", (req, res) => res.json({ ok: true, name: "Zəhrə Market Server" }));
 
@@ -400,6 +454,49 @@ function startServer(userDataDir, port = 4000, onError) {
     res.json(data);
   });
 
+  // "Stok sayımı" (physical inventory count) confirmation — each item's
+  // final counted quantity REPLACES the recorded stok (not added to it),
+  // since the whole point of a count is reconciling what's on the shelf
+  // against what the system thinks is there. Recorded as one "Sayım"
+  // stock-movement per product, logging the delta so the audit trail still
+  // shows what changed and by how much.
+  app.post("/api/stock/count", (req, res) => {
+    const data = loadData(dataFile);
+    if (!requireAdmin(req, res, data)) return;
+    const { items } = req.body || {};
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "Sayım siyahısı boşdur." });
+    }
+    let applied = 0;
+    for (const it of items) {
+      // Not parseInt: a weighed product's tally is scanned off the scale's
+      // barcode in kg (e.g. 0.35), not whole units — truncating it here
+      // would silently zero out any count under 1kg.
+      const sayilan = Math.round((Number(it.sayilan) + Number.EPSILON) * 1000) / 1000;
+      const product = data.products.find((p) => p.kod === it.kod);
+      if (!product || isNaN(sayilan) || sayilan < 0) continue;
+      const eskiStok = product.stok || 0;
+      const delta = Math.round((sayilan - eskiStok + Number.EPSILON) * 1000) / 1000;
+      product.stok = sayilan;
+      if (delta !== 0) {
+        data.stockMovements.unshift({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          tarix: nowStr(),
+          kod: product.kod,
+          ad: product.ad,
+          tip: delta > 0 ? "Giriş" : "Çıxış",
+          miqdar: Math.abs(delta),
+          sebeb: `Sayım (əvvəlki: ${eskiStok}, sayılan: ${sayilan})`,
+          qaliq: product.stok,
+        });
+      }
+      applied++;
+    }
+    if (applied === 0) return res.status(400).json({ error: "Heç bir düzgün sətir tapılmadı." });
+    saveData(dataFile, data);
+    res.json(data);
+  });
+
   // A whole "Mal qəbulu" batch — one supplier, many scanned line items — is
   // saved as a single purchase record (for the Təchizatçı history view) plus
   // one stock-movement per line (so it still shows up in the existing Stok
@@ -536,6 +633,27 @@ function startServer(userDataDir, port = 4000, onError) {
     console.error(`Server could not bind to port ${port}:`, err);
     if (typeof onError === "function") onError(err);
   });
+
+  // HTTPS listener for the "Telefon (Skaner)" role — see getOrCreateHttpsCert's
+  // comment above for why this exists as a second port instead of moving the
+  // whole app to HTTPS. Its failure is non-fatal: Admin/Kassa on the main
+  // HTTP port keeps working either way, so this only logs, it doesn't call
+  // onError (which would show the user a blocking "server failed" dialog for
+  // a feature they may not even be using).
+  const httpsPort = port + 443;
+  getOrCreateHttpsCert(userDataDir)
+    .then(({ key, cert }) => {
+      const httpsServer = https.createServer({ key, cert }, app).listen(httpsPort, "0.0.0.0", () => {
+        console.log(`Zəhrə Market HTTPS (Telefon/Skaner): https://0.0.0.0:${httpsPort}`);
+      });
+      httpsServer.on("error", (err) => {
+        console.error(`HTTPS server could not bind to port ${httpsPort}:`, err);
+      });
+    })
+    .catch((err) => {
+      console.error("HTTPS server could not start (Telefon/Skaner role will be unavailable):", err);
+    });
+
   return httpServer;
 }
 
