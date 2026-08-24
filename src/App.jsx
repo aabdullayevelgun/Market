@@ -4583,6 +4583,225 @@ function QiymetYoxlaBody() {
   );
 }
 
+// "Mal qəbulu" (phone) — a supplier delivery arrives, a worker scans it
+// against the paper invoice as it's unloaded. Nothing is written to the
+// real stok while this is going on: the whole session lives only in
+// localStorage until "Qəbulu tamamla" is pressed, so a miscount or an
+// interrupted session never leaves a half-applied stock change behind —
+// exactly the "əvvəl gözləyir, sonra əsas stoka keçir" requirement.
+const QEBUL_DRAFT_KEY = "zehra_qebul_draft";
+
+function MalQebuluBody() {
+  const { products, settings, suppliers, addPurchase } = useMarket();
+  const [draft, setDraft] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(QEBUL_DRAFT_KEY) || "null");
+    } catch {
+      return null;
+    }
+  });
+  const [tedarukcuInput, setTedarukcuInput] = useState("");
+  const [senedInput, setSenedInput] = useState("");
+  const [unknownKod, setUnknownKod] = useState(null);
+  const [completing, setCompleting] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const persistDraft = (next) => {
+    setDraft(next);
+    if (next) localStorage.setItem(QEBUL_DRAFT_KEY, JSON.stringify(next));
+    else localStorage.removeItem(QEBUL_DRAFT_KEY);
+  };
+
+  const startDraft = () => {
+    if (!tedarukcuInput.trim()) return;
+    persistDraft({ tedarukcu: tedarukcuInput.trim(), sened: senedInput.trim(), rows: [] });
+  };
+
+  const cancelDraft = () => {
+    if (!window.confirm("Bu qəbul ləğv edilsin? Skan edilən heç nə stoka yazılmayacaq.")) return;
+    persistDraft(null);
+    setTedarukcuInput("");
+    setSenedInput("");
+  };
+
+  // First scan of a product adds it with sayılan=1 and an empty "sənəddə"
+  // (the worker fills that in from the paper invoice by tapping it) — every
+  // scan after that just bumps sayılan, same "oxut, say artsın" behaviour
+  // as Stok sayımı.
+  const handleDecode = (code) => {
+    const { product, gram } = resolveScannedProduct(code, products, settings);
+    if (!product) {
+      setUnknownKod(code);
+      return;
+    }
+    setUnknownKod(null);
+    const amount = gram != null ? round2(gram / 1000) : 1;
+    setDraft((prev) => {
+      const rows = prev.rows;
+      const i = rows.findIndex((r) => r.kod === product.kod);
+      const nextRows =
+        i >= 0
+          ? rows.map((r, idx) => (idx === i ? { ...r, sayilan: round2(r.sayilan + amount) } : r))
+          : [{ kod: product.kod, ad: product.ad, senedde: "", sayilan: amount }, ...rows];
+      const next = { ...prev, rows: nextRows };
+      localStorage.setItem(QEBUL_DRAFT_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const updateSenedde = (kod, value) => {
+    setDraft((prev) => {
+      const next = { ...prev, rows: prev.rows.map((r) => (r.kod === kod ? { ...r, senedde: value } : r)) };
+      localStorage.setItem(QEBUL_DRAFT_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const removeRow = (kod) => {
+    setDraft((prev) => {
+      const next = { ...prev, rows: prev.rows.filter((r) => r.kod !== kod) };
+      localStorage.setItem(QEBUL_DRAFT_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const rowStatus = (r) => {
+    const expected = r.senedde === "" ? null : Number(r.senedde);
+    if (expected == null || isNaN(expected)) return { icon: "•", tone: "text-gray-400", label: "" };
+    const diff = round2(r.sayilan - expected);
+    if (diff === 0) return { icon: "✅", tone: "text-green-600", label: "" };
+    if (diff < 0) return { icon: "⚠️", tone: "text-amber-600", label: String(diff) };
+    return { icon: "🔴", tone: "text-red-600", label: `+${diff}` };
+  };
+
+  const complete = async () => {
+    if (!draft || draft.rows.length === 0) return;
+    setCompleting(true);
+    const ok = await addPurchase({
+      tedarukcu: draft.tedarukcu,
+      sened: draft.sened,
+      items: draft.rows.map((r) => ({ kod: r.kod, miqdar: r.sayilan })),
+      endirimPct: 0,
+    });
+    setCompleting(false);
+    if (ok) {
+      persistDraft(null);
+      setTedarukcuInput("");
+      setSenedInput("");
+      setMsg({ text: "Qəbul tamamlandı və stoka yazıldı.", isError: false });
+    } else {
+      setMsg({ text: "Yadda saxlanmadı — serverlə əlaqəni yoxlayın.", isError: true });
+    }
+    setTimeout(() => setMsg(null), 4000);
+  };
+
+  if (!draft) {
+    return (
+      <div className="space-y-3">
+        {msg && (
+          <div className={`text-sm font-semibold rounded-xl px-3 py-2 ${msg.isError ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}>
+            {msg.text}
+          </div>
+        )}
+        <div>
+          <FormField label="Təchizatçı" value={tedarukcuInput} onChange={(e) => setTedarukcuInput(e.target.value)} list="qebul-mobil-tedarukcu" placeholder="Təchizatçı adı" />
+          <datalist id="qebul-mobil-tedarukcu">
+            {(suppliers || []).map((s) => <option key={s.ad} value={s.ad} />)}
+          </datalist>
+        </div>
+        <FormField label="Faktura/sənəd №" value={senedInput} onChange={(e) => setSenedInput(e.target.value)} placeholder="İstəyə bağlı" />
+        <button
+          onClick={startDraft}
+          disabled={!tedarukcuInput.trim()}
+          className="w-full bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl py-3 font-bold text-sm"
+        >
+          Yeni qəbul yarat
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <div className="font-bold text-sm">{draft.tedarukcu}</div>
+          {draft.sened && <div className="text-xs text-gray-400">Sənəd: {draft.sened}</div>}
+        </div>
+        <button onClick={cancelDraft} className="text-xs font-semibold text-red-500">
+          Ləğv et
+        </button>
+      </div>
+
+      <BarcodeScannerView onDecode={handleDecode} />
+
+      {unknownKod && (
+        <div className="mt-4">
+          <UnknownBarcodeCard kod={unknownKod} onDismiss={() => setUnknownKod(null)} onAdded={() => setUnknownKod(null)} />
+        </div>
+      )}
+
+      {draft.rows.length > 0 && (
+        <div className="mt-4 bg-white rounded-2xl border border-gray-200 overflow-hidden">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-gray-400 bg-gray-50">
+                <th className="py-2 px-3">Məhsul</th>
+                <th className="py-2 px-2 w-16">Sənəddə</th>
+                <th className="py-2 px-2 w-14">Sayılan</th>
+                <th className="py-2 px-2 w-10">Vəz.</th>
+                <th className="py-2 px-1 w-6"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {draft.rows.map((r) => {
+                const status = rowStatus(r);
+                return (
+                  <tr key={r.kod} className="border-t border-gray-100">
+                    <td className="py-2 px-3 font-medium truncate max-w-[110px]">{r.ad}</td>
+                    <td className="py-2 px-2">
+                      <input
+                        type="number"
+                        value={r.senedde}
+                        placeholder="—"
+                        onChange={(e) => updateSenedde(r.kod, e.target.value)}
+                        className="w-14 border border-gray-200 rounded-lg px-1.5 py-1 text-xs"
+                      />
+                    </td>
+                    <td className="py-2 px-2 font-bold">{r.sayilan}</td>
+                    <td className={`py-2 px-2 font-semibold ${status.tone}`}>
+                      {status.icon} {status.label}
+                    </td>
+                    <td className="py-2 px-1">
+                      <button onClick={() => removeRow(r.kod)} className="text-gray-300 hover:text-red-500">
+                        <XCircle size={14} />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div className="px-3 py-3 border-t border-gray-100">
+            <button
+              onClick={complete}
+              disabled={completing}
+              className="w-full bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl py-3 font-bold text-sm"
+            >
+              {completing ? "Göndərilir..." : "Qəbulu tamamla"}
+            </button>
+          </div>
+        </div>
+      )}
+      {msg && (
+        <div className={`mt-4 text-sm font-semibold rounded-xl px-3 py-2 ${msg.isError ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}>
+          {msg.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BackupPage() {
   const { products, sales, employees, suppliers, stockMovements, purchases, settings, setSettings, restoreBackup } = useMarket();
   const [restoring, setRestoring] = useState(false);
@@ -5046,17 +5265,18 @@ function TelefonSkanerShell({ onResetRole }) {
 
         {/* Segmented tab switch — raised "3D" pill */}
         <div
-          className="grid grid-cols-2 gap-1 p-1.5 rounded-2xl mb-5"
+          className="grid grid-cols-3 gap-1 p-1.5 rounded-2xl mb-5"
           style={{ background: "rgba(0,0,0,0.35)", boxShadow: "inset 0 2px 6px rgba(0,0,0,0.5)" }}
         >
           {[
-            { key: "sayim", label: "Stok sayımı", icon: ClipboardList },
-            { key: "qiymet", label: "Qiymət yoxla", icon: Tag },
+            { key: "sayim", label: "Sayım", icon: ClipboardList },
+            { key: "qebul", label: "Mal qəbulu", icon: Download },
+            { key: "qiymet", label: "Qiymət", icon: Tag },
           ].map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               onClick={() => setTab(key)}
-              className={`flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold transition-all ${
+              className={`flex items-center justify-center gap-1.5 py-3 rounded-xl text-xs font-bold transition-all ${
                 tab === key ? "text-[#0c4526]" : "text-white/50"
               }`}
               style={
@@ -5065,7 +5285,7 @@ function TelefonSkanerShell({ onResetRole }) {
                   : {}
               }
             >
-              <Icon size={16} /> {label}
+              <Icon size={15} /> {label}
             </button>
           ))}
         </div>
@@ -5076,7 +5296,9 @@ function TelefonSkanerShell({ onResetRole }) {
           className="bg-[#f4f6f5] text-[#1a2b22] rounded-3xl p-4"
           style={{ boxShadow: "0 20px 40px -15px rgba(0,0,0,0.6)" }}
         >
-          {tab === "sayim" ? <StokSayimiBody /> : <QiymetYoxlaBody />}
+          {tab === "sayim" && <StokSayimiBody />}
+          {tab === "qebul" && <MalQebuluBody />}
+          {tab === "qiymet" && <QiymetYoxlaBody />}
         </div>
       </div>
     </div>

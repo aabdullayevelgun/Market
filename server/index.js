@@ -549,7 +549,7 @@ function startServer(userDataDir, port = 4000, onError) {
   app.post("/api/purchases", (req, res) => {
     const data = loadData(dataFile);
     if (!requireAdmin(req, res, data)) return;
-    const { tedarukcu, items, endirimPct } = req.body || {};
+    const { tedarukcu, items, endirimPct, sened } = req.body || {};
     if (!tedarukcu || !String(tedarukcu).trim() || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "Təchizatçı adı və ən azı bir mal tələb olunur." });
     }
@@ -592,6 +592,7 @@ function startServer(userDataDir, port = 4000, onError) {
       cekNo,
       tarix: nowStr(),
       tedarukcu: String(tedarukcu).trim(),
+      sened: sened ? String(sened).trim() : "",
       items: savedItems,
       cemi,
       endirimPct: pct,
