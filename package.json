@@ -12,6 +12,8 @@
     "electron:build": "npm run build && electron-builder"
   },
   "dependencies": {
+    "@zxing/browser": "^0.2.1",
+    "@zxing/library": "^0.23.0",
     "express": "^4.19.2",
     "html5-qrcode": "^2.3.8",
     "lucide-react": "^0.400.0",

@@ -8,7 +8,8 @@ import {
 } from "lucide-react";
 import { BarChart, Bar, ResponsiveContainer, XAxis, Tooltip } from "recharts";
 import * as XLSX from "xlsx";
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
+import { BrowserMultiFormatReader } from "@zxing/browser";
+import { BarcodeFormat, DecodeHintType, NotFoundException } from "@zxing/library";
 
 /* ---------------------------------------------------------------- */
 /* Shared mock data                                                  */
@@ -4126,17 +4127,18 @@ function playBeep() {
   }
 }
 
-// iOS (Safari and Chrome-on-iOS both run on WebKit) has no native
-// BarcodeDetector — every scan there runs through html5-qrcode's bundled
-// zxing-js decoder, which tries every format in this list against every
-// frame. Kept to the formats real retail barcodes actually use; every
-// extra format here is directly extra per-frame latency on iOS.
-const BARCODE_FORMATS = [
-  Html5QrcodeSupportedFormats.EAN_13,
-  Html5QrcodeSupportedFormats.EAN_8,
-  Html5QrcodeSupportedFormats.UPC_A,
-  Html5QrcodeSupportedFormats.UPC_E,
-  Html5QrcodeSupportedFormats.CODE_128,
+// html5-qrcode's bundled JS decoder never decoded a single frame in
+// testing — flat or curved, any qrbox size, no qrbox at all — while a
+// separately-written native scanner on the same phone read the same
+// barcodes instantly. That points at the decoder itself, not our config,
+// so the whole scan engine was swapped for ZXing's own actively-maintained
+// browser port instead of continuing to tune html5-qrcode's.
+const ZXING_FORMATS = [
+  BarcodeFormat.EAN_13,
+  BarcodeFormat.EAN_8,
+  BarcodeFormat.UPC_A,
+  BarcodeFormat.UPC_E,
+  BarcodeFormat.CODE_128,
 ];
 
 // Continuous camera scanning: stays open across scans (the whole point —
@@ -4144,27 +4146,20 @@ const BARCODE_FORMATS = [
 // the same code firing repeatedly while it's still in frame, and beeps +
 // vibrates on every accepted decode. `onDecode` is called with the raw text.
 function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
-  const regionIdRef = React.useRef(`barcode-scanner-${Math.random().toString(36).slice(2)}`);
-  const scannerRef = React.useRef(null);
+  const videoRef = React.useRef(null);
+  const controlsRef = React.useRef(null);
   const lastRef = React.useRef({ code: "", time: 0 });
   const [torchOn, setTorchOn] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
   const [error, setError] = useState("");
-  // Temporary on-screen diagnostics — shows what the per-frame decode
-  // attempts are actually returning (frame count + the most recent
-  // rejection reason), throttled to ~1/sec so it doesn't spam re-renders.
-  // The point is to see the REAL failure instead of guessing again.
-  const [debugInfo, setDebugInfo] = useState("");
-  const debugRef = React.useRef({ count: 0, lastUpdate: 0 });
 
   React.useEffect(() => {
     let cancelled = false;
-    let started = false;
 
-    // Surface exactly why, before even trying — the raw "Kameraya çıxış
-    // alınmadı" message with no detail was making every real cause (insecure
-    // context, no camera hardware exposed to the browser at all, OS-level
-    // app permission block, an actual JS bug) look identical from the
+    // Surface exactly why, before even trying — a raw "check your
+    // permissions" message with no detail was making every real cause
+    // (insecure context, no camera hardware exposed at all, an OS-level
+    // app permission block, an unrelated JS bug) look identical from the
     // outside, which is why earlier troubleshooting kept guessing wrong.
     if (typeof window !== "undefined" && !window.isSecureContext) {
       setError("Bu səhifə https (təhlükəsiz) ünvanından açılmayıb — kamera ona görə işləmir.");
@@ -4175,92 +4170,49 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
       return;
     }
 
-    const html5QrCode = new Html5Qrcode(regionIdRef.current, {
-      formatsToSupport: BARCODE_FORMATS,
-      // Modern Android Chrome exposes the browser's own native barcode
-      // decoder (BarcodeDetector), which is dramatically faster and more
-      // reliable at 1D retail barcodes than the bundled zxing-js fallback —
-      // without this, html5-qrcode always uses the JS fallback even when
-      // the native one is available.
-      useBarCodeDetectorIfSupported: true,
-      verbose: false,
-    });
-    scannerRef.current = html5QrCode;
+    const hints = new Map();
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
+    hints.set(DecodeHintType.TRY_HARDER, true);
+    const reader = new BrowserMultiFormatReader(hints);
 
-    html5QrCode
-      .start(
-        // html5-qrcode validates this first argument strictly: as an
-        // object it must have EXACTLY one key (facingMode OR deviceId) —
-        // passing width/height alongside facingMode here (a previous
-        // "improvement") made every start() call reject outright with a
-        // validation error, on every device, regardless of camera
-        // permissions. The resolution hint belongs in the second config's
-        // videoConstraints instead.
-        { facingMode: "environment" },
-        {
-          // On the (iOS) JS-decoder fallback path, each attempted decode
-          // takes longer than 1000/15ms — asking for more frames per
-          // second than the decoder can actually keep up with just queues
-          // up stale frames instead of scanning faster. 10 is
-          // html5-qrcode's own recommended default.
-          fps: 10,
-          // No qrbox at all — scans the entire frame, no cropping/scaling
-          // math involved. A sized box (fixed, then viewfinder-relative)
-          // was tried first and neither decoded anything even on a flat,
-          // well-lit barcode, which points at html5-qrcode's own
-          // region-cropping coordinate math rather than box size — this
-          // removes that whole code path from the picture entirely to
-          // confirm (or fix outright, if that was really it).
-          disableFlip: true,
-          // 1080p was overkill for the JS decoder — scanning a bigger frame
-          // takes proportionally longer with no real accuracy gain past
-          // what's needed to resolve a barcode's bars at normal holding
-          // distance. 720p decodes noticeably faster on mid-range phones.
-          videoConstraints: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-        },
-        (decodedText) => {
-          const now = Date.now();
-          if (decodedText === lastRef.current.code && now - lastRef.current.time < rescanDelayMs) return;
-          lastRef.current = { code: decodedText, time: now };
-          playBeep();
-          if (navigator.vibrate) navigator.vibrate(70);
-          onDecode(decodedText);
-        },
-        (errMsg) => {
-          // Almost always "no code found in this frame" noise — but
-          // surfacing it (throttled) is what lets us tell that apart from
-          // "frames aren't arriving at all" or a hard decoder exception.
-          const d = debugRef.current;
-          d.count++;
-          const now = Date.now();
-          if (now - d.lastUpdate > 1000) {
-            d.lastUpdate = now;
-            setDebugInfo(`${d.count} kadr yoxlanıldı — son: ${String(errMsg).slice(0, 80)}`);
+    reader
+      .decodeFromConstraints(
+        { video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } },
+        videoRef.current,
+        (result, err) => {
+          if (result) {
+            const now = Date.now();
+            const text = result.getText();
+            if (text === lastRef.current.code && now - lastRef.current.time < rescanDelayMs) return;
+            lastRef.current = { code: text, time: now };
+            playBeep();
+            if (navigator.vibrate) navigator.vibrate(70);
+            onDecode(text);
+            return;
+          }
+          // NotFoundException fires on essentially every frame without a
+          // decodable code in view — that's normal, not a real error.
+          if (err && !(err instanceof NotFoundException) && !cancelled) {
+            // A genuinely unexpected decode-loop error — rare, but surface
+            // it instead of silently continuing so it isn't invisible.
           }
         }
       )
-      .then(() => {
+      .then((controls) => {
         if (cancelled) {
-          // Unmounted (e.g. user navigated away) before the camera actually
-          // finished opening — html5-qrcode has no "start still pending"
-          // cancel, so just stop it immediately instead of leaving the
-          // camera light on with nothing listening for the cleanup below.
-          html5QrCode.stop().catch(() => {});
+          controls.stop();
           return;
         }
-        started = true;
+        controlsRef.current = controls;
         try {
-          const caps = html5QrCode.getRunningTrackCameraCapabilities();
-          setTorchSupported(!!(caps && caps.torchFeature && caps.torchFeature().isSupported()));
+          const track = videoRef.current && videoRef.current.srcObject && videoRef.current.srcObject.getVideoTracks()[0];
+          const caps = track && track.getCapabilities && track.getCapabilities();
+          setTorchSupported(!!(caps && caps.torch));
         } catch {
           setTorchSupported(false);
         }
       })
       .catch((err) => {
-        // The generic "check your permissions" message was hiding what
-        // actually failed (NotAllowedError vs NotFoundError vs a plain JS
-        // exception unrelated to permissions at all) — every prior fix
-        // attempt was guessing blind without this.
         if (cancelled) return;
         const detail = (err && (err.message || err.name || String(err))) || "naməlum xəta";
         setError(`Kameraya çıxış alınmadı: ${detail}`);
@@ -4268,23 +4220,19 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
 
     return () => {
       cancelled = true;
-      // .stop() throws synchronously (not a rejected promise) when the
-      // scanner never successfully started — e.g. permission denied, or
-      // unmounted before start() resolved — so this must be a try/catch,
-      // not a .catch() on the call.
-      if (started) {
-        try {
-          html5QrCode.stop().then(() => html5QrCode.clear()).catch(() => {});
-        } catch {}
+      if (controlsRef.current) {
+        controlsRef.current.stop();
+        controlsRef.current = null;
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const toggleTorch = async () => {
-    if (!scannerRef.current) return;
     try {
-      await scannerRef.current.applyVideoConstraints({ advanced: [{ torch: !torchOn }] });
+      const track = videoRef.current && videoRef.current.srcObject && videoRef.current.srcObject.getVideoTracks()[0];
+      if (!track) return;
+      await track.applyConstraints({ advanced: [{ torch: !torchOn }] });
       setTorchOn((t) => !t);
     } catch {
       // Device/browser doesn't actually support torch control despite reporting it — ignore.
@@ -4293,12 +4241,12 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
 
   return (
     <div className="relative rounded-2xl overflow-hidden bg-black">
-      {/* No forced object-fit/sizing on the video here — html5-qrcode lays out
-          its own video element and the qrbox overlay together internally;
-          overriding that (e.g. object-fit: cover) desyncs the visible scan
-          box from the pixel region it's actually decoding, which was
-          exactly why aiming a barcode inside the box didn't decode it. */}
-      <div id={regionIdRef.current} className="w-full" style={{ minHeight: 220 }} />
+      <video ref={videoRef} className="w-full block" style={{ minHeight: 220 }} muted playsInline />
+      {/* Decorative guide only — ZXing scans the whole frame, this box is
+          just showing the user roughly where to aim, not a hard crop. */}
+      {!error && (
+        <div className="absolute inset-8 border-2 border-white/70 rounded-xl pointer-events-none" style={{ top: "35%", bottom: "35%" }} />
+      )}
       {torchSupported && (
         <button
           onClick={toggleTorch}
@@ -4311,11 +4259,6 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
       {error && (
         <div className="absolute inset-0 bg-black/80 flex items-center justify-center p-4 text-center text-white text-sm font-semibold">
           {error}
-        </div>
-      )}
-      {!error && debugInfo && (
-        <div className="absolute bottom-0 inset-x-0 bg-black/70 text-white text-[10px] font-mono px-2 py-1 truncate">
-          {debugInfo}
         </div>
       )}
     </div>
