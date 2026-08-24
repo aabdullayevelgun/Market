@@ -2491,6 +2491,10 @@ function StokPage() {
   const [qebulBarkod, setQebulBarkod] = useState("");
   const [qebulError, setQebulError] = useState("");
   const [qebulSaving, setQebulSaving] = useState(false);
+  // Supplier's invoice-level discount (e.g. "7% endirim" announced at the
+  // end) — applied only to the payable total, never written back onto the
+  // per-product alış qiyməti.
+  const [qebulEndirim, setQebulEndirim] = useState("");
   // Same rationale as MehsullarPage: a large catalog import can put tens of
   // thousands of rows here, and rendering them all at once freezes the tab.
   const [page, setPage] = useState(0);
@@ -2558,7 +2562,18 @@ function StokPage() {
     setQebulRows([]);
     setQebulBarkod("");
     setQebulError("");
+    setQebulEndirim("");
     setQebulOpen(true);
+  };
+
+  // Markup % shown next to alış qiyməti: e.g. alış 1 AZN + 20% → satış 1.20
+  // AZN. Kept as its own field (not derived each render) so it survives
+  // being blank/mid-typed without fighting the user's keystrokes.
+  const markupFromPrices = (alish, satish) => {
+    const a = Number(alish);
+    const s = Number(satish);
+    if (!a || a <= 0 || !(s > a)) return "";
+    return String(round2(((s - a) / a) * 100));
   };
 
   const qebulScan = (rawCode) => {
@@ -2579,16 +2594,51 @@ function StokPage() {
         next[i] = { ...next[i], miqdar: next[i].miqdar + 1 };
         return next;
       }
-      return [...rows, { kod: product.kod, ad: product.ad, miqdar: 1, alish: product.alish, satish: product.satish }];
+      return [
+        ...rows,
+        {
+          kod: product.kod,
+          ad: product.ad,
+          miqdar: 1,
+          alish: product.alish,
+          satish: product.satish,
+          markup: markupFromPrices(product.alish, product.satish),
+        },
+      ];
     });
   };
 
   const updateQebulRow = (kod, field, value) => {
-    setQebulRows((rows) => rows.map((r) => (r.kod === kod ? { ...r, [field]: value } : r)));
+    setQebulRows((rows) =>
+      rows.map((r) => {
+        if (r.kod !== kod) return r;
+        if (field === "markup") {
+          const a = Number(r.alish) || 0;
+          const pct = Number(value) || 0;
+          const satish = value === "" ? r.satish : round2(a * (1 + pct / 100));
+          return { ...r, markup: value, satish };
+        }
+        if (field === "alish") {
+          // Keep satış in sync with the markup % already set for this row,
+          // so bumping the purchase price doesn't silently leave the old
+          // (now wrong) sale price behind.
+          const a = Number(value) || 0;
+          const pct = Number(r.markup) || 0;
+          const satish = r.markup === "" ? r.satish : round2(a * (1 + pct / 100));
+          return { ...r, alish: value, satish };
+        }
+        if (field === "satish") {
+          return { ...r, satish: value, markup: markupFromPrices(r.alish, value) };
+        }
+        return { ...r, [field]: value };
+      })
+    );
   };
   const removeQebulRow = (kod) => setQebulRows((rows) => rows.filter((r) => r.kod !== kod));
 
   const qebulTotal = qebulRows.reduce((s, r) => s + (Number(r.miqdar) || 0) * (Number(r.alish) || 0), 0);
+  const qebulEndirimPct = Number(qebulEndirim) || 0;
+  const qebulOdeniler = round2(qebulTotal * (1 - qebulEndirimPct / 100));
 
   // Applies every row as a stock-in movement, and only touches prices for
   // rows where the entered value actually differs from the product's
@@ -2790,6 +2840,7 @@ function StokPage() {
                       <th className="py-2 px-3">Mal</th>
                       <th className="py-2 px-3 w-20">Miqdar</th>
                       <th className="py-2 px-3 w-24">Alış qiy.</th>
+                      <th className="py-2 px-3 w-20">Nisbət %</th>
                       <th className="py-2 px-3 w-24">Satış qiy.</th>
                       <th className="py-2 px-3 w-24">Məbləğ</th>
                       <th className="py-2 px-3 w-8"></th>
@@ -2818,6 +2869,15 @@ function StokPage() {
                         <td className="py-2 px-3">
                           <input
                             type="number"
+                            value={r.markup}
+                            placeholder="20"
+                            onChange={(e) => updateQebulRow(r.kod, "markup", e.target.value)}
+                            className="w-full border border-gray-200 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-green-400"
+                          />
+                        </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="number"
                             value={r.satish}
                             onChange={(e) => updateQebulRow(r.kod, "satish", e.target.value)}
                             className="w-full border border-gray-200 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-green-400"
@@ -2839,19 +2899,35 @@ function StokPage() {
               <div className="text-xs text-gray-400 text-center py-6">Barkod skan edərək mal siyahısına əlavə edin.</div>
             )}
             <div className="flex items-center justify-between border-t border-gray-100 pt-3">
-              <div className="text-sm font-bold">Cəmi: {fmt(qebulTotal)} AZN</div>
-              <div className="flex gap-2">
-                <button onClick={() => setQebulOpen(false)} className="py-2.5 px-4 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
-                  Ləğv et
-                </button>
-                <button
-                  onClick={saveQebul}
-                  disabled={qebulRows.length === 0 || qebulSaving}
-                  className="py-2.5 px-6 bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl font-bold text-sm"
-                >
-                  {qebulSaving ? "Saxlanılır..." : "Yadda saxla"}
-                </button>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500">Təchizatçı endirimi</span>
+                <input
+                  type="number"
+                  value={qebulEndirim}
+                  placeholder="0"
+                  onChange={(e) => setQebulEndirim(e.target.value)}
+                  className="w-16 border border-gray-200 rounded-lg px-2 py-1 text-sm text-center focus:outline-none focus:border-green-400"
+                />
+                <span className="text-xs text-gray-500">%</span>
               </div>
+              <div className="text-right">
+                {qebulEndirimPct > 0 && (
+                  <div className="text-xs text-gray-400 line-through">{fmt(qebulTotal)} AZN</div>
+                )}
+                <div className="text-sm font-bold">Ödəniləcək: {fmt(qebulOdeniler)} AZN</div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setQebulOpen(false)} className="py-2.5 px-4 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
+                Ləğv et
+              </button>
+              <button
+                onClick={saveQebul}
+                disabled={qebulRows.length === 0 || qebulSaving}
+                className="py-2.5 px-6 bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl font-bold text-sm"
+              >
+                {qebulSaving ? "Saxlanılır..." : "Yadda saxla"}
+              </button>
             </div>
           </div>
         </Modal>
