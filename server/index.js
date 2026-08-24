@@ -95,7 +95,11 @@ function isLocalRequest(req) {
 // (file://, so Origin is absent/"null") or the Vite dev server — never
 // presents an arbitrary public-website Origin, so anything that does is
 // rejected outright, regardless of what isLocalRequest or the token say.
-const TRUSTED_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|(\d{1,3}\.){3}\d{1,3})(:\d+)?$/i;
+// A *.ts.net origin is also trusted: that's a Tailscale Serve address (see
+// "Telefon (Skaner)" role), reachable only by devices already inside this
+// specific private tailnet — nobody outside it can get DNS or a cert for
+// it, so it's exactly as trustworthy as a bare LAN IP.
+const TRUSTED_ORIGIN_RE = /^https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.ts\.net$|^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|(\d{1,3}\.){3}\d{1,3})(:\d+)?$/i;
 function isTrustedOrigin(req) {
   const origin = req.headers.origin;
   if (!origin || origin === "null") return true; // file:// app, or a non-browser caller
