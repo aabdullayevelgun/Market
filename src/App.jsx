@@ -359,7 +359,7 @@ function MarketProvider({ children, serverUrl, token = "" }) {
     connected, loading,
     addProduct, updateProduct, deleteProduct, adjustStock, adjustStockBy, returnSale,
     addSupplier, updateSupplier, deleteSupplier, addEmployee, deleteEmployee, addSale, setSettings, restoreBackup,
-    importProducts, resetSales, setAdminPw,
+    importProducts, resetSales, setAdminPw, adminPw,
   };
 
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>;
@@ -637,7 +637,7 @@ function FormField({ label, ...props }) {
 
 function KassaView({ role }) {
   const canDiscount = role !== "kassa";
-  const { products, sales, addSale, returnSale, settings } = useMarket();
+  const { products, sales, addSale, returnSale, settings, updateProduct, adminPw, setAdminPw } = useMarket();
   const [returningNo, setReturningNo] = useState(null);
   const [returnMsg, setReturnMsg] = useState(null);
 
@@ -681,6 +681,41 @@ function KassaView({ role }) {
   // etmək üçün — kassir hər dənə üçün ayrıca toxunmasın.
   const [barkodsuzQtyFor, setBarkodsuzQtyFor] = useState(null);
   const [barkodsuzQty, setBarkodsuzQty] = useState("1");
+  // "+" üzərindən "Barkodsuz mallar" siyahısını idarə etmək (Məhsullar
+  // səhifəsinə keçib hər birini tək-tək redaktə etmək əvəzinə birbaşa
+  // buradan seçmək/çıxarmaq).
+  const [barkodsuzPickerOpen, setBarkodsuzPickerOpen] = useState(false);
+  const [bpQuery, setBpQuery] = useState("");
+  const [bpBusyKod, setBpBusyKod] = useState(null);
+  const [bpNeedsPw, setBpNeedsPw] = useState(false);
+  const [bpPwInput, setBpPwInput] = useState("");
+  const [bpPwError, setBpPwError] = useState(false);
+
+  const bpMatches = useMemo(() => {
+    const q = bpQuery.trim().toLowerCase();
+    const pool = q
+      ? products.filter((p) => p.ad.toLowerCase().includes(q) || p.kod.includes(q))
+      : products.filter((p) => p.barkodsuz);
+    return pool.slice(0, 30);
+  }, [bpQuery, products]);
+
+  const toggleBarkodsuz = async (p) => {
+    setBpBusyKod(p.kod);
+    const ok = await updateProduct(p.kod, { barkodsuz: !p.barkodsuz });
+    setBpBusyKod(null);
+    if (!ok) setBpNeedsPw(true);
+  };
+
+  const submitBpPw = () => {
+    if (settings.adminSifre && bpPwInput === settings.adminSifre) {
+      setAdminPw(bpPwInput);
+      setBpNeedsPw(false);
+      setBpPwInput("");
+      setBpPwError(false);
+    } else {
+      setBpPwError(true);
+    }
+  };
 
   const lineTotal = (item) => item.qiymet * item.miqdar * (1 - item.endirim / 100);
   const subtotal = useMemo(() => cart.reduce((s, i) => s + lineTotal(i), 0), [cart]);
@@ -1137,8 +1172,15 @@ function KassaView({ role }) {
             Məhsullar (fresh bread, eggs, in-house goods with nothing to
             scan). The cashier taps the name/price directly instead. */}
         <div className="bg-white rounded-2xl border border-gray-200 flex flex-col">
-          <div className="px-4 py-4 border-b border-gray-100">
+          <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
             <span className="font-bold text-sm">Barkodsuz mallar</span>
+            <button
+              onClick={() => { setBarkodsuzPickerOpen(true); setBpQuery(""); }}
+              className="w-7 h-7 rounded-full bg-green-50 text-[#16a34a] flex items-center justify-center hover:bg-green-100"
+              title="Barkodsuz məhsul seç"
+            >
+              <Plus size={16} />
+            </button>
           </div>
           <div className="flex-1 overflow-auto p-3 space-y-2">
             {barkodsuzMehsullar.length === 0 && (
@@ -1200,6 +1242,75 @@ function KassaView({ role }) {
               className="w-full bg-[#16a34a] text-white font-bold rounded-xl py-2.5 hover:bg-[#15803d]"
             >
               Səbətə əlavə et
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* Hansı məhsulların "Barkodsuz mallar" siyahısında görünəcəyini
+          birbaşa Kassa ekranından seçmək — Məhsullar səhifəsinə keçib hər
+          birini ayrıca redaktə etmək əvəzinə. */}
+      {barkodsuzPickerOpen && (
+        <Modal title="Barkodsuz məhsul seç" onClose={() => setBarkodsuzPickerOpen(false)} widthClass="max-w-md">
+          <div className="p-4 space-y-3">
+            <input
+              type="text"
+              autoFocus
+              value={bpQuery}
+              onChange={(e) => setBpQuery(e.target.value)}
+              placeholder="Məhsul axtar (məs. çörək, yumurta)..."
+              className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-green-400"
+            />
+            {!bpQuery.trim() && (
+              <div className="text-[11px] text-gray-400">Hazırda seçilmiş məhsullar göstərilir. Yeni məhsul tapmaq üçün axtarın.</div>
+            )}
+            <div className="max-h-80 overflow-auto space-y-1.5 -mx-1 px-1">
+              {bpMatches.length === 0 && (
+                <div className="text-center text-gray-400 text-xs py-8">Nəticə tapılmadı.</div>
+              )}
+              {bpMatches.map((p) => (
+                <label
+                  key={p.kod}
+                  className="flex items-center gap-2.5 border border-gray-200 rounded-xl px-3 py-2 cursor-pointer hover:border-green-300"
+                >
+                  <input
+                    type="checkbox"
+                    checked={!!p.barkodsuz}
+                    disabled={bpBusyKod === p.kod}
+                    onChange={() => toggleBarkodsuz(p)}
+                    className="w-4 h-4 accent-[#16a34a]"
+                  />
+                  <div className="w-7 h-7 rounded-lg bg-green-50 flex items-center justify-center text-sm shrink-0">
+                    {barkodsuzIcon(p.ad)}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium truncate">{p.ad}</div>
+                    {p.kat && <div className="text-[11px] text-gray-400 truncate">{p.kat}</div>}
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Barkodsuz seçimi admin-qorumalı marşrutu vurdu (Kassa PC-dən, yerli
+          olmayan sorğu) — parolu bir dəfə soruşub sessiya boyu yadda saxla,
+          eyni Admin panelinin parol qapısı kimi. */}
+      {bpNeedsPw && (
+        <Modal title="Admin şifrəsi tələb olunur" onClose={() => setBpNeedsPw(false)} widthClass="max-w-xs">
+          <div className="p-5 space-y-3">
+            <input
+              type="password"
+              autoFocus
+              value={bpPwInput}
+              onChange={(e) => { setBpPwInput(e.target.value); setBpPwError(false); }}
+              onKeyDown={(e) => e.key === "Enter" && submitBpPw()}
+              className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-center focus:outline-none focus:border-green-400"
+            />
+            {bpPwError && <div className="text-red-500 text-xs font-semibold">Şifrə yanlışdır.</div>}
+            <button onClick={submitBpPw} className="w-full bg-[#16a34a] text-white font-bold rounded-xl py-2.5 hover:bg-[#15803d]">
+              Təsdiqlə
             </button>
           </div>
         </Modal>
