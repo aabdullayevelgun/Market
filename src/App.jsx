@@ -4152,6 +4152,21 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
   React.useEffect(() => {
     let cancelled = false;
     let started = false;
+
+    // Surface exactly why, before even trying — the raw "Kameraya çıxış
+    // alınmadı" message with no detail was making every real cause (insecure
+    // context, no camera hardware exposed to the browser at all, OS-level
+    // app permission block, an actual JS bug) look identical from the
+    // outside, which is why earlier troubleshooting kept guessing wrong.
+    if (typeof window !== "undefined" && !window.isSecureContext) {
+      setError("Bu səhifə https (təhlükəsiz) ünvanından açılmayıb — kamera ona görə işləmir.");
+      return;
+    }
+    if (typeof navigator === "undefined" || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setError("Bu brauzer kameraya çıxışı dəstəkləmir (navigator.mediaDevices yoxdur).");
+      return;
+    }
+
     const html5QrCode = new Html5Qrcode(regionIdRef.current, {
       formatsToSupport: BARCODE_FORMATS,
       // Modern Android Chrome exposes the browser's own native barcode
@@ -4203,8 +4218,14 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
           setTorchSupported(false);
         }
       })
-      .catch(() => {
-        if (!cancelled) setError("Kameraya çıxış alınmadı — brauzerdən kamera icazəsini yoxlayın.");
+      .catch((err) => {
+        // The generic "check your permissions" message was hiding what
+        // actually failed (NotAllowedError vs NotFoundError vs a plain JS
+        // exception unrelated to permissions at all) — every prior fix
+        // attempt was guessing blind without this.
+        if (cancelled) return;
+        const detail = (err && (err.message || err.name || String(err))) || "naməlum xəta";
+        setError(`Kameraya çıxış alınmadı: ${detail}`);
       });
 
     return () => {
