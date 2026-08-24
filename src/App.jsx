@@ -120,6 +120,28 @@ const fmt = (n) => (n || 0).toLocaleString("az-AZ", { minimumFractionDigits: 2, 
 // compared against a typed amount, both sides need to go through this first.
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+// Small icon for "Barkodu yoxdur" quick-add items (fresh bread, eggs, etc.),
+// guessed from keywords in the product name. Purely cosmetic — falls back to
+// a generic box icon when nothing matches.
+const BARKODSUZ_ICON_RULES = [
+  { keys: ["COREY", "ÇÖRƏK", "BAGET", "BULKA", "FRANSIZ"], icon: "🍞" },
+  { keys: ["YUMURTA"], icon: "🥚" },
+  { keys: ["SUD", "SÜD"], icon: "🥛" },
+  { keys: ["SU ", "SU1", "SU5"], icon: "💧" },
+  { keys: ["PENDIR", "PEYNIR"], icon: "🧀" },
+  { keys: ["ET ", "TOYUQ", "MURGH"], icon: "🍗" },
+  { keys: ["TERAVEZ", "TƏRƏVƏZ", "POMIDOR", "XIYAR", "SOGAN"], icon: "🥦" },
+  { keys: ["MEYVE", "MEYVƏ", "ALMA", "BANAN"], icon: "🍎" },
+  { keys: ["KEKS", "TORT", "PECENYA", "PEÇENYE"], icon: "🍰" },
+];
+function barkodsuzIcon(name) {
+  const upper = (name || "").toUpperCase();
+  for (const rule of BARKODSUZ_ICON_RULES) {
+    if (rule.keys.some((k) => upper.includes(k))) return rule.icon;
+  }
+  return "📦";
+}
+
 // Fixed low-stock threshold — not configurable per product. Below this,
 // items are flagged/sorted to the top everywhere stock status is shown.
 const LOW_STOCK_ESIYI = 5;
@@ -655,6 +677,10 @@ function KassaView({ role }) {
   const [viewSale, setViewSale] = useState(null);
   const [scanMsg, setScanMsg] = useState(null);
   const [lastAdded, setLastAdded] = useState(null);
+  // Barkodsuz siyahıdan çoxlu miqdar (məs. "50 yumurta") bir dəfəyə əlavə
+  // etmək üçün — kassir hər dənə üçün ayrıca toxunmasın.
+  const [barkodsuzQtyFor, setBarkodsuzQtyFor] = useState(null);
+  const [barkodsuzQty, setBarkodsuzQty] = useState("1");
 
   const lineTotal = (item) => item.qiymet * item.miqdar * (1 - item.endirim / 100);
   const subtotal = useMemo(() => cart.reduce((s, i) => s + lineTotal(i), 0), [cart]);
@@ -1124,10 +1150,13 @@ function KassaView({ role }) {
             {barkodsuzMehsullar.map((p) => (
               <button
                 key={p.kod}
-                onClick={() => addToCart(p)}
-                className="w-full text-left border border-gray-200 rounded-xl px-3 py-2.5 hover:border-[#16a34a] hover:bg-green-50/40 transition flex items-center justify-between gap-2"
+                onClick={() => { setBarkodsuzQtyFor(p); setBarkodsuzQty("1"); }}
+                className="w-full text-left border border-gray-200 rounded-xl px-3 py-2.5 hover:border-[#16a34a] hover:bg-green-50/40 transition flex items-center gap-2.5"
               >
-                <div className="min-w-0">
+                <div className="w-8 h-8 rounded-lg bg-green-50 flex items-center justify-center text-base shrink-0">
+                  {barkodsuzIcon(p.ad)}
+                </div>
+                <div className="min-w-0 flex-1">
                   <div className="text-sm font-semibold truncate">{p.ad}</div>
                   {p.kat && <div className="text-[11px] text-gray-400 truncate">{p.kat}</div>}
                 </div>
@@ -1139,6 +1168,42 @@ function KassaView({ role }) {
           </div>
         </div>
       </div>
+
+      {/* Barkodsuz mala miqdar seçimi — "50 yumurta" kimi çoxlu say bir
+          dəfəyə səbətə əlavə oluna bilsin, hər dənə üçün ayrıca klik lazım
+          olmasın. */}
+      {barkodsuzQtyFor && (
+        <Modal title={barkodsuzQtyFor.ad} onClose={() => setBarkodsuzQtyFor(null)} widthClass="max-w-xs">
+          <div className="p-5 space-y-3">
+            <label className="block text-xs font-semibold text-gray-500">
+              {barkodsuzQtyFor.novu === "çəki" ? "Miqdar (kq)" : "Miqdar (ədəd)"}
+            </label>
+            <input
+              type="number"
+              autoFocus
+              value={barkodsuzQty}
+              onChange={(e) => setBarkodsuzQty(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                const n = parseFloat(barkodsuzQty);
+                if (n > 0) { addToCart(barkodsuzQtyFor, n); setBarkodsuzQtyFor(null); }
+              }}
+              step={barkodsuzQtyFor.novu === "çəki" ? "0.1" : "1"}
+              min="0"
+              className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-lg font-bold text-center focus:outline-none focus:border-green-400"
+            />
+            <button
+              onClick={() => {
+                const n = parseFloat(barkodsuzQty);
+                if (n > 0) { addToCart(barkodsuzQtyFor, n); setBarkodsuzQtyFor(null); }
+              }}
+              className="w-full bg-[#16a34a] text-white font-bold rounded-xl py-2.5 hover:bg-[#15803d]"
+            >
+              Səbətə əlavə et
+            </button>
+          </div>
+        </Modal>
+      )}
 
       {/* Delete confirmation modal (manager code required) */}
       {confirmDeleteKod && (
@@ -1608,7 +1673,7 @@ const NAV = [
   { key: "parametrler", label: "Parametrlər", icon: Settings },
 ];
 
-function StatCard({ label, value, sub, icon: Icon, tone = "green" }) {
+function StatCard({ label, value, sub, icon: Icon, tone = "green", onClick }) {
   const tones = {
     green: "bg-green-50 text-green-600",
     red: "bg-red-50 text-red-500",
@@ -1616,7 +1681,10 @@ function StatCard({ label, value, sub, icon: Icon, tone = "green" }) {
     amber: "bg-amber-50 text-amber-600",
   };
   return (
-    <div className="bg-white rounded-2xl border border-gray-200 p-5">
+    <div
+      onClick={onClick}
+      className={`bg-white rounded-2xl border border-gray-200 p-5 ${onClick ? "cursor-pointer hover:border-green-300 transition-colors" : ""}`}
+    >
       <div className="flex items-start justify-between">
         <div>
           <div className="text-xs text-gray-500 font-medium">{label}</div>
@@ -1670,26 +1738,59 @@ function PageHeader({ title }) {
 }
 
 function IcmalPage({ onNavigate }) {
-  const { sales, products } = useMarket();
+  const { sales, products, employees } = useMarket();
   const bugunSales = sales.filter((s) => s.tarix && s.tarix.startsWith(nowDateStr()));
   const bugunMeblegh = bugunSales.reduce((sum, s) => sum + (s.meblegh || 0), 0);
   const stokDeyeri = products.reduce((sum, p) => sum + p.stok * p.alish, 0);
   const azalanStok = products.filter((p) => p.stok > 0 && p.stok <= LOW_STOCK_ESIYI).length;
+  const bitenStok = products.filter((p) => p.stok <= 0).length;
 
-  const quickActions = [
-    { label: "Məhsul əlavə et", target: "mehsullar" },
-    { label: "Stok artır", target: "stok" },
-    { label: "Endirim yarat", target: "mehsullar" },
-    { label: "Hesabat aç", target: "hesabatlar" },
+  // Son 7 günün real satış cəmi (əvvəllər sabit/saxta CHART_DATA istifadə
+  // olunurdu — bu, mağazanın həqiqi satışları ilə heç bir əlaqəsi olmayan
+  // nümunə rəqəmlər idi).
+  const weekChartData = useMemo(() => {
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const key = `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}`;
+      days.push({ key, gun: String(d.getDate()), satish: 0 });
+    }
+    for (const s of sales) {
+      if (!s.tarix) continue;
+      const dateKey = s.tarix.split(" ")[0];
+      const day = days.find((d) => d.key === dateKey);
+      if (day) day.satish += s.meblegh || 0;
+    }
+    return days;
+  }, [sales]);
+
+  // Ümumi statistika: sabit sətir sayı ilə (kassir/satış siyahısından fərqli
+  // olaraq satış artdıqca uzanıb qəlizləşmir).
+  const umumiGelir = useMemo(() => sales.reduce((sum, s) => sum + (s.meblegh || 0), 0), [sales]);
+  const ortaCek = sales.length > 0 ? umumiGelir / sales.length : 0;
+  const umumiStats = [
+    { label: "Ümumi satış sayı", value: sales.length.toLocaleString("az-AZ") },
+    { label: "Ümumi gəlir", value: `${fmt(umumiGelir)} AZN` },
+    { label: "Orta çek", value: `${fmt(ortaCek)} AZN` },
+    { label: "Məhsul sayı", value: products.length.toLocaleString("az-AZ") },
+    { label: "İşçi sayı", value: String((employees || []).length) },
   ];
+
   return (
     <div>
       <PageHeader title="İcmal" />
-      <div className="grid grid-cols-4 gap-4 mb-5">
+      <div className="grid grid-cols-3 gap-4 mb-5">
         <StatCard label="Bu gün satış" value={`${fmt(bugunMeblegh)} AZN`} sub={`${bugunSales.length} satış`} icon={TrendingUp} tone="green" />
-        <StatCard label="Satış sayı" value={String(sales.length)} sub="Ümumi (bütün tarix)" icon={Receipt} tone="blue" />
         <StatCard label="Stok dəyəri" value={`${fmt(stokDeyeri)} AZN`} sub="Anbar üzrə" icon={Boxes} tone="amber" />
-        <StatCard label="Azalan stok" value={`${azalanStok} məhsul`} sub="Diqqət tələb edir" icon={AlertTriangle} tone="red" />
+        <StatCard
+          label="Stok xəbərdarlığı"
+          value={`${azalanStok + bitenStok} məhsul`}
+          sub={`${azalanStok} azalır, ${bitenStok} bitib`}
+          icon={AlertTriangle}
+          tone="red"
+          onClick={() => onNavigate && onNavigate("stok")}
+        />
       </div>
 
       <div className="grid grid-cols-[1.4fr_1fr] gap-4 mb-5">
@@ -1697,7 +1798,7 @@ function IcmalPage({ onNavigate }) {
           <div className="text-sm font-bold text-gray-600 mb-3">SATIŞLAR — SON 7 GÜN</div>
           <div className="h-48">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={CHART_DATA}>
+              <BarChart data={weekChartData}>
                 <XAxis dataKey="gun" axisLine={false} tickLine={false} fontSize={12} />
                 <Tooltip formatter={(v) => `${fmt(v)} AZN`} />
                 <Bar dataKey="satish" fill="#22c55e" radius={[6, 6, 0, 0]} />
@@ -1706,23 +1807,25 @@ function IcmalPage({ onNavigate }) {
           </div>
         </div>
         <div className="bg-white rounded-2xl border border-gray-200 p-5">
-          <div className="text-sm font-bold text-gray-600 mb-3">SÜRƏTLİ ƏMƏLİYYATLAR</div>
-          <div className="grid grid-cols-2 gap-3">
-            {quickActions.map((t) => (
-              <button
-                key={t.label}
-                onClick={() => onNavigate && onNavigate(t.target)}
-                className="border border-gray-200 rounded-xl py-4 text-sm font-semibold text-gray-600 hover:border-green-400 hover:text-green-600"
-              >
-                {t.label}
-              </button>
+          <div className="text-sm font-bold text-gray-600 mb-3">ÜMUMİ STATİSTİKA</div>
+          <div className="space-y-3">
+            {umumiStats.map((s) => (
+              <div key={s.label} className="flex items-center justify-between border-b border-gray-100 last:border-0 pb-3 last:pb-0">
+                <div className="text-sm text-gray-500">{s.label}</div>
+                <div className="text-sm font-bold text-gray-700">{s.value}</div>
+              </div>
             ))}
           </div>
         </div>
       </div>
 
       <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-        <div className="px-5 py-3 font-bold text-sm text-gray-600 border-b border-gray-100">SON SATIŞLAR</div>
+        <div className="px-5 py-3 flex items-center justify-between border-b border-gray-100">
+          <div className="font-bold text-sm text-gray-600">SON SATIŞLAR</div>
+          <button onClick={() => onNavigate && onNavigate("satislar")} className="text-xs font-semibold text-green-600 hover:text-green-700">
+            Hamısını gör →
+          </button>
+        </div>
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-gray-400 text-xs">
@@ -1731,7 +1834,7 @@ function IcmalPage({ onNavigate }) {
             </tr>
           </thead>
           <tbody>
-            {sales.slice(0, 3).map((s) => (
+            {sales.slice(0, 5).map((s) => (
               <tr key={s.no} className="border-t border-gray-100">
                 <td className="py-3 px-5 font-medium">{s.no}</td>
                 <td className="py-3 px-5">{s.kassir}</td>
@@ -2179,20 +2282,31 @@ function StokPage() {
   // Same rationale as MehsullarPage: a large catalog import can put tens of
   // thousands of rows here, and rendering them all at once freezes the tab.
   const [page, setPage] = useState(0);
-  // "azalan" (default): low/out-of-stock first, as before. "coxdan-aza" and
-  // "azdan-coxa" let the user sort purely by quantity in either direction.
-  const [siralama, setSiralama] = useState("azalan");
+  // Default: highest stock first on page open. "azalan" (low/out-of-stock
+  // first) and "azdan-coxa" remain available from the dropdown.
+  const [siralama, setSiralama] = useState("coxdan-aza");
+  // Status filter: "Hamısı" / "Azalır" (low stock) / "Bitib" (out of stock).
+  const [durumFilter, setDurumFilter] = useState("Hamısı");
 
-  const totalUnits = products.reduce((s, p) => s + p.stok, 0);
+  // Piece-counted and weighed (kg) products use different units, so a single
+  // combined sum ("84 ədəd + 45kq" as one number) would be meaningless.
+  const totalUnitsEded = products.filter((p) => p.novu !== "çəki").reduce((s, p) => s + p.stok, 0);
+  const totalUnitsKq = products.filter((p) => p.novu === "çəki").reduce((s, p) => s + p.stok, 0);
   const lowStock = products.filter((p) => p.stok > 0 && p.stok <= LOW_STOCK_ESIYI).length;
   const outStock = products.filter((p) => p.stok <= 0).length;
   const stockValue = products.reduce((s, p) => s + p.stok * p.alish, 0);
 
-  const sorted = [...products].sort((a, b) => {
+  const filteredByDurum = products.filter((p) => {
+    if (durumFilter === "Azalır") return p.stok > 0 && p.stok <= LOW_STOCK_ESIYI;
+    if (durumFilter === "Bitib") return p.stok <= 0;
+    return true;
+  });
+
+  const sorted = [...filteredByDurum].sort((a, b) => {
     if (siralama === "coxdan-aza") return b.stok - a.stok;
     if (siralama === "azdan-coxa") return a.stok - b.stok;
-    // Default: low/out-of-stock items float to the top so they're the first
-    // thing seen on this page, not buried in a long alphabetical list.
+    // "azalan": low/out-of-stock items float to the top so they're the first
+    // thing seen, not buried in a long alphabetical list.
     const aLow = a.stok <= LOW_STOCK_ESIYI;
     const bLow = b.stok <= LOW_STOCK_ESIYI;
     if (aLow !== bLow) return aLow ? -1 : 1;
@@ -2245,9 +2359,16 @@ function StokPage() {
     <div>
       <PageHeader title="Stok" />
       <div className="grid grid-cols-4 gap-4 mb-5">
-        <StatCard label="Ümumi stok" value={totalUnits.toLocaleString("az-AZ")} sub="ədəd" icon={Boxes} tone="green" />
-        <StatCard label="Azalan stok" value={String(lowStock)} sub={`məhsul (≤ ${LOW_STOCK_ESIYI} ədəd)`} icon={AlertTriangle} tone="amber" />
-        <StatCard label="Bitən stok" value={String(outStock)} sub="məhsul" icon={XCircle} tone="red" />
+        <StatCard
+          label="Ümumi stok"
+          value={`${totalUnitsEded.toLocaleString("az-AZ")} ədəd`}
+          sub={`${totalUnitsKq.toLocaleString("az-AZ", { maximumFractionDigits: 3 })} kq (çəki ilə)`}
+          icon={Boxes}
+          tone="green"
+          onClick={() => { setDurumFilter("Hamısı"); setPage(0); }}
+        />
+        <StatCard label="Azalan stok" value={String(lowStock)} sub={`məhsul (≤ ${LOW_STOCK_ESIYI} ədəd)`} icon={AlertTriangle} tone="amber" onClick={() => { setDurumFilter("Azalır"); setPage(0); }} />
+        <StatCard label="Bitən stok" value={String(outStock)} sub="məhsul" icon={XCircle} tone="red" onClick={() => { setDurumFilter("Bitib"); setPage(0); }} />
         <StatCard label="Stok dəyəri" value={`${fmt(stockValue)} AZN`} sub="alış qiyməti ilə" icon={Wallet} tone="blue" />
       </div>
       <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
@@ -2255,13 +2376,22 @@ function StokPage() {
           <div className="font-bold text-sm text-gray-600">STOK NƏZARƏTİ</div>
           <div className="flex items-center gap-3">
             <select
+              value={durumFilter}
+              onChange={(e) => { setDurumFilter(e.target.value); setPage(0); }}
+              className="border border-gray-200 rounded-lg px-3 py-1.5 text-xs font-semibold text-gray-600 focus:outline-none focus:border-green-400"
+            >
+              <option value="Hamısı">Hamısı</option>
+              <option value="Azalır">Azalan stok</option>
+              <option value="Bitib">Bitən stok</option>
+            </select>
+            <select
               value={siralama}
               onChange={(e) => { setSiralama(e.target.value); setPage(0); }}
               className="border border-gray-200 rounded-lg px-3 py-1.5 text-xs font-semibold text-gray-600 focus:outline-none focus:border-green-400"
             >
-              <option value="azalan">Əvvəlcə azalan/bitən</option>
               <option value="coxdan-aza">Stok: çoxdan aza</option>
               <option value="azdan-coxa">Stok: azdan çoxa</option>
+              <option value="azalan">Əvvəlcə azalan/bitən</option>
             </select>
             <button onClick={exportMovements} className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 hover:text-gray-700">
               <Download size={14} /> Stok hərəkətləri (Excel)
