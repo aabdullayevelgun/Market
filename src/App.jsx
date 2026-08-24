@@ -4186,7 +4186,24 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
 
     reader
       .decodeFromConstraints(
-        { video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } },
+        {
+          video: {
+            facingMode: "environment",
+            // Bumped back up from 720p — a small barcode's bars need more
+            // raw detail to resolve at all, and ZXing decodes fast enough
+            // now that the extra resolution doesn't reintroduce the earlier
+            // stutter the way it did on html5-qrcode's JS fallback.
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            // Continuous autofocus, where the browser exposes it (mainly
+            // Android Chrome — iOS Safari doesn't expose focus control to
+            // web pages at all, a platform limitation no web app can work
+            // around). Without this some devices default to a fixed focus
+            // distance that's fine for a person's face but too far for a
+            // small barcode held close.
+            advanced: [{ focusMode: "continuous" }],
+          },
+        },
         videoRef.current,
         (result, err) => {
           if (result) {
@@ -4248,8 +4265,23 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
     }
   };
 
+  // Tapping the preview nudges continuous-autofocus devices to refocus —
+  // toggling the constraint off then back on is a common trick to force a
+  // refocus pulse when a small/close barcode is still soft. No effect on
+  // iOS (it doesn't expose focus control to the page at all), but harmless.
+  const tapToFocus = async () => {
+    try {
+      const track = videoRef.current && videoRef.current.srcObject && videoRef.current.srcObject.getVideoTracks()[0];
+      if (!track) return;
+      await track.applyConstraints({ advanced: [{ focusMode: "manual" }] });
+      await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+    } catch {
+      // Not supported on this device/browser — ignore.
+    }
+  };
+
   return (
-    <div className="relative rounded-2xl overflow-hidden bg-black">
+    <div className="relative rounded-2xl overflow-hidden bg-black" onClick={tapToFocus}>
       <video ref={videoRef} className="w-full block" style={{ minHeight: 220 }} muted playsInline />
       {/* Decorative guide only — ZXing scans the whole frame, this box is
           just showing the user roughly where to aim, not a hard crop. */}
