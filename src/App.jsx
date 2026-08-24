@@ -614,11 +614,16 @@ function RoleSetup({ onDone }) {
   // the admin password is only asked here so it can be sent along with the
   // stock-count confirms, which are admin-gated the same as Mal qəbulu.
   const connectScanner = async () => {
-    // https, and the +443 port — see getOrCreateHttpsCert's comment in
-    // server/index.js for why the scanner role needs its own HTTPS listener
-    // (camera access requires a secure context; plain http://<lan-ip> can't
-    // grant it, no matter what the phone's permission prompt says).
-    const url = `https://${ip.trim()}:4443`;
+    // Camera access needs a secure context, which plain http://<lan-ip>
+    // can never get regardless of what the phone's permission prompt says.
+    // Two ways to reach that here: a bare IP goes through our own
+    // self-signed cert on the +443 port (see getOrCreateHttpsCert in
+    // server/index.js — needs a one-time manual trust step, especially on
+    // iOS); anything else is treated as a real hostname — e.g. a Tailscale
+    // Serve address like admin.tailXXXX.ts.net — which already carries a
+    // publicly-trusted cert and "just works" with no such step.
+    const isBareIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(ip.trim());
+    const url = isBareIp ? `https://${ip.trim()}:4443` : `https://${ip.trim()}`;
     setTesting(true);
     setTestError("");
     try {
@@ -628,7 +633,7 @@ function RoleSetup({ onDone }) {
       if (!stateRes.ok) throw new Error("token");
       onDone("scanner", url, tokenInput.trim(), pwInput);
     } catch {
-      setTestError("Qoşulmaq mümkün olmadı. Bu telefonda əvvəlcə https ünvanını açıb sertifikat xəbərdarlığını qəbul etdiyindən, IP/tokenin doğru olduğundan və Admin kompüterinin açıq olduğundan əmin olun.");
+      setTestError("Qoşulmaq mümkün olmadı. Bu telefonda əvvəlcə https ünvanını açıb (lazım gələrsə sertifikat xəbərdarlığını qəbul edib), IP/host və tokenin doğru olduğundan, Admin kompüterinin açıq olduğundan əmin olun.");
     } finally {
       setTesting(false);
     }
@@ -743,19 +748,20 @@ function RoleSetup({ onDone }) {
         {step === "scanner-ip" && (
           <>
             <div className="text-center mb-6">
-              <div className="font-black text-lg">Admin kompüterinin IP ünvanı</div>
+              <div className="font-black text-lg">Admin kompüterinin ünvanı</div>
               <div className="text-sm text-gray-400 mt-1">
-                Admin kompüterini açanda ona bu ünvan göstərilir (rol seçimindən sonra).
+                Adi IP (məs. 192.168.1.15) və ya Tailscale Serve ünvanı (məs. admin.tailXXXX.ts.net) — hər ikisi işləyir.
               </div>
             </div>
             {typeof window !== "undefined" && !window.isSecureContext && (
               <div className="bg-amber-50 border-2 border-amber-200 rounded-2xl p-4 mb-4 text-sm text-amber-800">
-                <b>Vacib:</b> kamera yalnız <code className="font-mono">https</code> ünvanından işləyir. Bu telefonun brauzerində əvvəlcə{" "}
-                <b>https://{"<Admin IP>"}:4443</b> ünvanını açın (aşağıdakı IP-ni yazandan sonra sertifikat xəbərdarlığı çıxsa "Davam et / Advanced → Proceed" seçin), sonra bu addımı təkrarlayın.
+                <b>Vacib:</b> kamera yalnız <code className="font-mono">https</code> ünvanından işləyir.
+                Tailscale ünvanı (…ts.net) istifadə edirsinizsə heç bir əlavə addım lazım deyil. Adi IP ilə isə bu telefonun brauzerində əvvəlcə{" "}
+                <b>https://{"<Admin IP>"}:4443</b> ünvanını açıb sertifikat xəbərdarlığını qəbul etmək (və iOS-da əlavə olaraq sertifikatı Tənzimləmələrdə etibar etmək) lazımdır, sonra bu addımı təkrarlayın.
               </div>
             )}
             <div className="space-y-3">
-              <FormField label="IP ünvanı" placeholder="məs. 192.168.1.15" value={ip} onChange={(e) => setIp(e.target.value)} />
+              <FormField label="IP və ya ünvan" placeholder="192.168.1.15 və ya admin.tailXXXX.ts.net" value={ip} onChange={(e) => setIp(e.target.value)} />
               <FormField
                 label="Token"
                 placeholder="Admin ekranında göstərilən kod"
