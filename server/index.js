@@ -29,31 +29,54 @@ function generateToken() {
 async function getOrCreateHttpsCert(userDataDir) {
   const keyFile = path.join(userDataDir, "https-key.pem");
   const certFile = path.join(userDataDir, "https-cert.pem");
-  if (fs.existsSync(keyFile) && fs.existsSync(certFile)) {
+  const ipsFile = path.join(userDataDir, "https-cert-ips.json");
+
+  // A laptop moving between networks (shop, home, ...) gets a different
+  // DHCP IP each time — the cert's SAN has to actually list whichever IP
+  // the phone is connecting to, or the browser refuses the connection
+  // outright (unlike the "not secure" warning, a SAN mismatch has no
+  // "proceed anyway" option on most browsers). Every IP this has ever run
+  // under gets accumulated into the same cert instead of overwritten, so a
+  // phone that already trusted this cert on one network doesn't have to
+  // redo the whole install-and-trust dance after going to another.
+  let knownIps = [];
+  try {
+    knownIps = JSON.parse(fs.readFileSync(ipsFile, "utf-8"));
+  } catch {
+    knownIps = [];
+  }
+  const currentIp = getLocalIp();
+  const needsNewIp = currentIp && !knownIps.includes(currentIp);
+
+  if (fs.existsSync(keyFile) && fs.existsSync(certFile) && !needsNewIp) {
     return { key: fs.readFileSync(keyFile), cert: fs.readFileSync(certFile) };
   }
+  if (needsNewIp) knownIps.push(currentIp);
+
   const selfsigned = require("selfsigned");
   const attrs = [{ name: "commonName", value: "zehra-market.local" }];
-  // Browsers validate the SAN strictly for IP connections — a CN or a
-  // wildcard DNS entry isn't enough. Covers every private LAN range this
-  // could plausibly be running on (the shop's actual DHCP-assigned IP is
-  // unknown at cert-generation time), plus the real current IP and
-  // loopback for good measure.
   const altNames = [
     { type: 7, ip: "127.0.0.1" },
     { type: 2, value: "localhost" },
     { type: 2, value: "zehra-market.local" },
+    ...knownIps.map((ip) => ({ type: 7, ip })),
   ];
-  const currentIp = getLocalIp();
-  if (currentIp) altNames.push({ type: 7, ip: currentIp });
   const pems = await selfsigned.generate(attrs, {
     days: 3650,
     keySize: 2048,
-    extensions: [{ name: "subjectAltName", altNames }],
+    extensions: [
+      { name: "subjectAltName", altNames },
+      // iOS only offers manual trust (Settings > General > About >
+      // Certificate Trust Settings) for certs flagged as a CA — without
+      // this, ours never even shows up there for the user to trust.
+      { name: "basicConstraints", cA: true },
+      { name: "keyUsage", keyCertSign: true, digitalSignature: true, keyEncipherment: true, cRLSign: true },
+    ],
   });
   fs.mkdirSync(userDataDir, { recursive: true });
   fs.writeFileSync(keyFile, pems.private);
   fs.writeFileSync(certFile, pems.cert);
+  fs.writeFileSync(ipsFile, JSON.stringify(knownIps));
   return { key: pems.private, cert: pems.cert };
 }
 
