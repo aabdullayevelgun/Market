@@ -4204,7 +4204,6 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
           // a lot on the slower JS fallback.
           qrbox: { width: 260, height: 100 },
           disableFlip: true,
-          aspectRatio: 1.777,
           // 1080p was overkill for the JS decoder — scanning a bigger frame
           // takes proportionally longer with no real accuracy gain past
           // what's needed to resolve a barcode's bars at normal holding
@@ -4275,7 +4274,12 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
 
   return (
     <div className="relative rounded-2xl overflow-hidden bg-black">
-      <div id={regionIdRef.current} className="w-full [&_video]:w-full [&_video]:object-cover" style={{ minHeight: 220 }} />
+      {/* No forced object-fit/sizing on the video here — html5-qrcode lays out
+          its own video element and the qrbox overlay together internally;
+          overriding that (e.g. object-fit: cover) desyncs the visible scan
+          box from the pixel region it's actually decoding, which was
+          exactly why aiming a barcode inside the box didn't decode it. */}
+      <div id={regionIdRef.current} className="w-full" style={{ minHeight: 220 }} />
       {torchSupported && (
         <button
           onClick={toggleTorch}
