@@ -250,6 +250,7 @@ function loadData(dataFile) {
   }
   if (!Array.isArray(data.stockMovements)) data.stockMovements = [];
   if (!Array.isArray(data.purchases)) data.purchases = [];
+  if (!Array.isArray(data.priceChanges)) data.priceChanges = [];
   return data;
 }
 
@@ -374,6 +375,34 @@ function startServer(userDataDir, port = 4000, onError) {
     data.products = data.products.map((p) =>
       p.kod === req.params.kod ? { ...p, ...req.body } : p
     );
+    saveData(dataFile, data);
+    res.json(data);
+  });
+
+  // Used specifically by the phone's "Qiymət yoxla → Qiyməti dəyiş" — a
+  // separate route from the generic PUT above so this one specific kind of
+  // change (a price edit made away from the desktop, while scanning) gets
+  // its own audit trail. The desktop Qiymət yoxla page shows this log
+  // instead of running its own camera, same reasoning as Stok sayımı.
+  app.post("/api/products/:kod/price", (req, res) => {
+    const data = loadData(dataFile);
+    if (!requireAdmin(req, res, data)) return;
+    const product = data.products.find((p) => p.kod === req.params.kod);
+    if (!product) return res.status(404).json({ error: "Məhsul tapılmadı." });
+    const yeni = Number(req.body && req.body.satish);
+    if (isNaN(yeni) || yeni < 0) return res.status(400).json({ error: "Düzgün qiymət tələb olunur." });
+    const eski = product.satish;
+    product.satish = yeni;
+    if (eski !== yeni) {
+      data.priceChanges.unshift({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        tarix: nowStr(),
+        kod: product.kod,
+        ad: product.ad,
+        eskiQiymet: eski,
+        yeniQiymet: yeni,
+      });
+    }
     saveData(dataFile, data);
     res.json(data);
   });
@@ -657,6 +686,7 @@ function startServer(userDataDir, port = 4000, onError) {
       suppliers: Array.isArray(incoming.suppliers) ? incoming.suppliers : [],
       stockMovements: Array.isArray(incoming.stockMovements) ? incoming.stockMovements : [],
       purchases: Array.isArray(incoming.purchases) ? incoming.purchases : [],
+      priceChanges: Array.isArray(incoming.priceChanges) ? incoming.priceChanges : [],
       // apiToken is never replaced by a restore, same reasoning as PUT /api/settings.
       settings:
         incoming.settings && typeof incoming.settings === "object"

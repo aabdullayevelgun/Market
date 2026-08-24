@@ -233,7 +233,7 @@ function parseCSV(text) {
 const MarketContext = createContext(null);
 const useMarket = () => useContext(MarketContext);
 
-const emptyState = { products: [], sales: [], employees: [], suppliers: [], stockMovements: [], purchases: [], settings: INITIAL_SETTINGS };
+const emptyState = { products: [], sales: [], employees: [], suppliers: [], stockMovements: [], purchases: [], priceChanges: [], settings: INITIAL_SETTINGS };
 
 const PENDING_SALES_KEY = "zehra_pending_sales";
 const PENDING_STOCK_KEY = "zehra_pending_stock";
@@ -403,6 +403,9 @@ function MarketProvider({ children, serverUrl, token = "", initialAdminPw = "" }
 
   const addProduct = (p) => call("POST", "/api/products", p);
   const updateProduct = (kod, patch) => call("PUT", `/api/products/${encodeURIComponent(kod)}`, patch);
+  // Separate from updateProduct so the desktop's Qiymət yoxla history page
+  // has a dedicated log of price edits made while scanning on a phone.
+  const updateProductPrice = (kod, satish) => call("POST", `/api/products/${encodeURIComponent(kod)}/price`, { satish });
   // delta > 0 = mal gəldi (stock-in), delta < 0 = stokdan çıxar (write-off,
   // reason required) — recorded as a stock movement instead of silently
   // overwriting the total. Offline, this queues (same as addSale) instead
@@ -527,7 +530,7 @@ function MarketProvider({ children, serverUrl, token = "", initialAdminPw = "" }
     pendingStockCount: pendingStock.length,
     pendingSayimCount: pendingCounts.length,
     connected, loading,
-    addProduct, updateProduct, deleteProduct, adjustStock, adjustStockBy, returnSale, confirmStockCount,
+    addProduct, updateProduct, updateProductPrice, deleteProduct, adjustStock, adjustStockBy, returnSale, confirmStockCount,
     addSupplier, updateSupplier, deleteSupplier, addEmployee, deleteEmployee, addSale, addPurchase, setSettings, restoreBackup,
     importProducts, resetSales, setAdminPw, adminPw,
   };
@@ -4658,18 +4661,92 @@ function StokSayimiBody() {
 // "Qiymət yoxla" — camera stays open, each scan just replaces the price
 // card on screen so a customer/employee can walk down items one after
 // another without touching the phone between scans.
+const QIYMET_TARIXCE_SEHIFE = 50;
+
+// Admin (desktop) doesn't need its own camera either — price checks (and
+// edits) happen on the phone. This page is a read-only history of every
+// price change made from Qiymət yoxla → "Qiyməti dəyiş", same treatment as
+// Stok sayımı's desktop page.
 function QiymetYoxlaPage() {
+  const { priceChanges } = useMarket();
+  const [page, setPage] = useState(0);
+
+  const list = priceChanges || [];
+  const pageCount = Math.max(1, Math.ceil(list.length / QIYMET_TARIXCE_SEHIFE));
+  const clampedPage = Math.min(page, pageCount - 1);
+  const paged = list.slice(clampedPage * QIYMET_TARIXCE_SEHIFE, (clampedPage + 1) * QIYMET_TARIXCE_SEHIFE);
+
   return (
-    <div className="max-w-md mx-auto">
+    <div>
       <PageHeader title="Qiymət yoxla" />
-      <QiymetYoxlaBody />
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-100 font-bold text-sm text-gray-600">QİYMƏT DƏYİŞİKLİKLƏRİ TARİXÇƏSİ</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-gray-400 text-xs">
+              <th className="py-2 px-5">Tarix</th>
+              <th className="py-2 px-5">Məhsul</th>
+              <th className="py-2 px-5">Köhnə qiymət</th>
+              <th className="py-2 px-5">Yeni qiymət</th>
+              <th className="py-2 px-5">Fərq</th>
+            </tr>
+          </thead>
+          <tbody>
+            {paged.map((c) => {
+              const fark = round2(c.yeniQiymet - c.eskiQiymet);
+              return (
+                <tr key={c.id} className="border-t border-gray-100">
+                  <td className="py-3 px-5 text-gray-500">{c.tarix}</td>
+                  <td className="py-3 px-5 font-medium">{c.ad}</td>
+                  <td className="py-3 px-5 text-gray-400 line-through">{fmt(c.eskiQiymet)} AZN</td>
+                  <td className="py-3 px-5 font-semibold">{fmt(c.yeniQiymet)} AZN</td>
+                  <td className={`py-3 px-5 font-semibold ${fark > 0 ? "text-green-600" : fark < 0 ? "text-red-600" : "text-gray-400"}`}>
+                    {fark > 0 ? "+" : ""}{fmt(fark)} AZN
+                  </td>
+                </tr>
+              );
+            })}
+            {list.length === 0 && (
+              <tr>
+                <td colSpan={5} className="py-8 text-center text-gray-400">
+                  Hələ heç bir qiymət dəyişikliyi qeydə alınmayıb — telefonda "Qiymət yoxla → Qiyməti dəyiş" ilə edilən dəyişikliklər burada görünəcək.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        {list.length > 0 && (
+          <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 text-xs text-gray-500">
+            <div>
+              {clampedPage * QIYMET_TARIXCE_SEHIFE + 1}–{Math.min((clampedPage + 1) * QIYMET_TARIXCE_SEHIFE, list.length)} / {list.length}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPage((pg) => Math.max(0, pg - 1))}
+                disabled={clampedPage === 0}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                « Əvvəlki
+              </button>
+              <span className="font-semibold">{clampedPage + 1} / {pageCount}</span>
+              <button
+                onClick={() => setPage((pg) => Math.min(pageCount - 1, pg + 1))}
+                disabled={clampedPage >= pageCount - 1}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                Sonrakı »
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 // Split out for the same reason as StokSayimiBody above.
 function QiymetYoxlaBody() {
-  const { products, settings, loading, updateProduct } = useMarket();
+  const { products, settings, loading, updateProductPrice } = useMarket();
   const [found, setFound] = useState(null);
   const [unknownKod, setUnknownKod] = useState(null);
   const [editing, setEditing] = useState(false);
@@ -4698,7 +4775,7 @@ function QiymetYoxlaBody() {
     const n = parseFloat(String(priceInput).replace(",", "."));
     if (!found || isNaN(n) || n < 0) return;
     setSaving(true);
-    const ok = await updateProduct(found.kod, { satish: n });
+    const ok = await updateProductPrice(found.kod, n);
     setSaving(false);
     if (ok) {
       setFound((f) => (f ? { ...f, satish: n } : f));
