@@ -47,6 +47,52 @@ function isAdminAuthorized(req, data) {
   return !!pw && !!data.settings.adminSifre && pw === data.settings.adminSifre;
 }
 
+// Wrong-password attempts against the admin gate are not rate-limited by
+// isAdminAuthorized itself (it's also used just to decide what /api/state
+// filters out, where "counting" a mismatch makes no sense). A LAN device —
+// or, now that isTrustedOrigin blocks browser-CSRF, anything actually on
+// the network — could otherwise try passwords as fast as it can open TCP
+// connections. 15 wrong attempts from one IP locks that IP out for 20
+// minutes; this resets on the next successful login from that IP.
+const ADMIN_ATTEMPT_LIMIT = 15;
+const ADMIN_BLOCK_MS = 20 * 60 * 1000;
+const adminAttempts = new Map(); // ip -> { count, blockedUntil }
+
+function getClientIp(req) {
+  return req.ip || (req.connection && req.connection.remoteAddress) || "unknown";
+}
+
+function isAdminBlocked(ip) {
+  const entry = adminAttempts.get(ip);
+  if (!entry || !entry.blockedUntil) return false;
+  if (entry.blockedUntil > Date.now()) return true;
+  adminAttempts.delete(ip); // block window passed — start clean
+  return false;
+}
+
+// Gate for the admin-only write routes: does the isAdminAuthorized check,
+// but also tracks/blocks repeated failures per IP and writes the response
+// itself (so every call site collapses to one line instead of repeating
+// the same three checks and error message ten times over).
+function requireAdmin(req, res, data) {
+  if (isLocalRequest(req)) return true;
+  const ip = getClientIp(req);
+  if (isAdminBlocked(ip)) {
+    res.status(429).json({ error: "Çox sayda səhv cəhd. 20 dəqiqə sonra yenidən sınayın." });
+    return false;
+  }
+  if (isAdminAuthorized(req, data)) {
+    adminAttempts.delete(ip);
+    return true;
+  }
+  const entry = adminAttempts.get(ip) || { count: 0 };
+  entry.count += 1;
+  if (entry.count >= ADMIN_ATTEMPT_LIMIT) entry.blockedUntil = Date.now() + ADMIN_BLOCK_MS;
+  adminAttempts.set(ip, entry);
+  res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+  return false;
+}
+
 function getLocalIp() {
   const nets = os.networkInterfaces();
   for (const name of Object.keys(nets)) {
@@ -216,7 +262,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.post("/api/products", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     data.products.push(req.body);
     saveData(dataFile, data);
     res.json(data);
@@ -224,7 +270,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.put("/api/products/:kod", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     data.products = data.products.map((p) =>
       p.kod === req.params.kod ? { ...p, ...req.body } : p
     );
@@ -234,7 +280,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.delete("/api/products/:kod", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     data.products = data.products.filter((p) => p.kod !== req.params.kod);
     saveData(dataFile, data);
     res.json(data);
@@ -242,7 +288,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.post("/api/suppliers", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     data.suppliers.unshift(req.body);
     saveData(dataFile, data);
     res.json(data);
@@ -250,7 +296,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.put("/api/suppliers/:ad", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     const target = decodeURIComponent(req.params.ad);
     data.suppliers = data.suppliers.map((s) => (s.ad === target ? { ...s, ...req.body } : s));
     saveData(dataFile, data);
@@ -259,7 +305,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.delete("/api/suppliers/:ad", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     const target = decodeURIComponent(req.params.ad);
     data.suppliers = data.suppliers.filter((s) => s.ad !== target);
     saveData(dataFile, data);
@@ -268,7 +314,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.post("/api/employees", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     data.employees.unshift(req.body);
     saveData(dataFile, data);
     res.json(data);
@@ -276,7 +322,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.delete("/api/employees/:ad", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     data.employees = data.employees.filter((e) => e.ad !== decodeURIComponent(req.params.ad));
     saveData(dataFile, data);
     res.json(data);
@@ -331,7 +377,7 @@ function startServer(userDataDir, port = 4000, onError) {
   // movement with a reason, not just silently overwritten.
   app.post("/api/stock/adjust", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     const { kod, delta, reason } = req.body || {};
     const change = parseInt(delta, 10);
     if (!kod || !change) return res.status(400).json({ error: "kod və delta tələb olunur." });
@@ -355,7 +401,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.put("/api/settings", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     // Merge instead of replacing wholesale, and never let a client overwrite
     // the LAN token through this route — that would let anyone who currently
     // holds it lock every other device out by rotating it from underneath them.
@@ -367,7 +413,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.post("/api/products/import", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     const incoming = Array.isArray(req.body.products) ? req.body.products : [];
     incoming.forEach((p) => {
       const idx = data.products.findIndex((existing) => existing.kod === p.kod);
@@ -380,7 +426,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.post("/api/sales/reset", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     data.sales = [];
     saveData(dataFile, data);
     res.json(data);
@@ -388,7 +434,7 @@ function startServer(userDataDir, port = 4000, onError) {
 
   app.post("/api/restore", (req, res) => {
     const data = loadData(dataFile);
-    if (!isAdminAuthorized(req, data)) return res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
+    if (!requireAdmin(req, res, data)) return;
     const incoming = req.body;
     const restored = {
       products: Array.isArray(incoming.products) ? incoming.products : [],
