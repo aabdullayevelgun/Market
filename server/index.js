@@ -178,6 +178,7 @@ function loadData(dataFile) {
     writeFileAtomic(dataFile, JSON.stringify(data, null, 2));
   }
   if (!Array.isArray(data.stockMovements)) data.stockMovements = [];
+  if (!Array.isArray(data.purchases)) data.purchases = [];
   return data;
 }
 
@@ -399,6 +400,70 @@ function startServer(userDataDir, port = 4000, onError) {
     res.json(data);
   });
 
+  // A whole "Mal qəbulu" batch — one supplier, many scanned line items — is
+  // saved as a single purchase record (for the Təchizatçı history view) plus
+  // one stock-movement per line (so it still shows up in the existing Stok
+  // hərəkətləri log), instead of the client looping N separate requests.
+  app.post("/api/purchases", (req, res) => {
+    const data = loadData(dataFile);
+    if (!requireAdmin(req, res, data)) return;
+    const { tedarukcu, items, endirimPct } = req.body || {};
+    if (!tedarukcu || !String(tedarukcu).trim() || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "Təchizatçı adı və ən azı bir mal tələb olunur." });
+    }
+    const savedItems = [];
+    let cemi = 0;
+    for (const it of items) {
+      const n = parseInt(it.miqdar, 10);
+      const product = data.products.find((p) => p.kod === it.kod);
+      if (!n || n <= 0 || !product) continue;
+      const alish = Number(it.alish);
+      const satish = Number(it.satish);
+      if (!isNaN(alish)) product.alish = alish;
+      if (!isNaN(satish)) product.satish = satish;
+      product.stok = Math.max(0, (product.stok || 0) + n);
+      data.stockMovements.unshift({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        tarix: nowStr(),
+        kod: product.kod,
+        ad: product.ad,
+        tip: "Giriş",
+        miqdar: n,
+        sebeb: `Mal qəbulu — ${tedarukcu}`,
+        qaliq: product.stok,
+      });
+      const xett = n * (isNaN(alish) ? product.alish : alish);
+      cemi += xett;
+      savedItems.push({ kod: product.kod, ad: product.ad, miqdar: n, alish: product.alish, satish: product.satish, mebleg: Math.round((xett + Number.EPSILON) * 100) / 100 });
+    }
+    if (savedItems.length === 0) return res.status(400).json({ error: "Heç bir düzgün sətir tapılmadı." });
+    const pct = Number(endirimPct) || 0;
+    cemi = Math.round((cemi + Number.EPSILON) * 100) / 100;
+    const odeniler = Math.round((cemi * (1 - pct / 100) + Number.EPSILON) * 100) / 100;
+    const purchase = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      tarix: nowStr(),
+      tedarukcu: String(tedarukcu).trim(),
+      items: savedItems,
+      cemi,
+      endirimPct: pct,
+      odeniler,
+    };
+    data.purchases.unshift(purchase);
+    // A tədarükçü typed here for the first time still needs to show up in
+    // Təchizatçılar (that's where the purchase history is browsed from) —
+    // not just silently record the purchase with nothing to click into.
+    const supplier = data.suppliers.find((s) => s.ad === purchase.tedarukcu);
+    if (supplier) {
+      supplier.sonAlish = purchase.tarix;
+      supplier.meblegh = odeniler;
+    } else {
+      data.suppliers.unshift({ ad: purchase.tedarukcu, tel: "", sonAlish: purchase.tarix, meblegh: odeniler, borc: 0, status: "Aktiv" });
+    }
+    saveData(dataFile, data);
+    res.json(data);
+  });
+
   app.put("/api/settings", (req, res) => {
     const data = loadData(dataFile);
     if (!requireAdmin(req, res, data)) return;
@@ -441,6 +506,8 @@ function startServer(userDataDir, port = 4000, onError) {
       sales: Array.isArray(incoming.sales) ? incoming.sales : [],
       employees: Array.isArray(incoming.employees) ? incoming.employees : [],
       suppliers: Array.isArray(incoming.suppliers) ? incoming.suppliers : [],
+      stockMovements: Array.isArray(incoming.stockMovements) ? incoming.stockMovements : [],
+      purchases: Array.isArray(incoming.purchases) ? incoming.purchases : [],
       // apiToken is never replaced by a restore, same reasoning as PUT /api/settings.
       settings:
         incoming.settings && typeof incoming.settings === "object"

@@ -213,7 +213,7 @@ function parseCSV(text) {
 const MarketContext = createContext(null);
 const useMarket = () => useContext(MarketContext);
 
-const emptyState = { products: [], sales: [], employees: [], suppliers: [], settings: INITIAL_SETTINGS };
+const emptyState = { products: [], sales: [], employees: [], suppliers: [], stockMovements: [], purchases: [], settings: INITIAL_SETTINGS };
 
 const PENDING_SALES_KEY = "zehra_pending_sales";
 const PENDING_STOCK_KEY = "zehra_pending_stock";
@@ -432,6 +432,7 @@ function MarketProvider({ children, serverUrl, token = "" }) {
       cancelled = true;
     };
   }, [connected]);
+  const addPurchase = (payload) => call("POST", "/api/purchases", payload);
   const setSettings = (s) => call("PUT", "/api/settings", s);
   const restoreBackup = (data) => call("POST", "/api/restore", data);
   const importProducts = (list) => call("POST", "/api/products/import", { products: list });
@@ -451,7 +452,7 @@ function MarketProvider({ children, serverUrl, token = "" }) {
     pendingStockCount: pendingStock.length,
     connected, loading,
     addProduct, updateProduct, deleteProduct, adjustStock, adjustStockBy, returnSale,
-    addSupplier, updateSupplier, deleteSupplier, addEmployee, deleteEmployee, addSale, setSettings, restoreBackup,
+    addSupplier, updateSupplier, deleteSupplier, addEmployee, deleteEmployee, addSale, addPurchase, setSettings, restoreBackup,
     importProducts, resetSales, setAdminPw, adminPw,
   };
 
@@ -2476,7 +2477,7 @@ const CIXIS_SEBEBLERI = ["İtib", "Xarab olub", "Vaxtı bitib", "Oğurlanıb", "
 const STOK_SEHIFE_OLCUSU = 50;
 
 function StokPage() {
-  const { products, stockMovements, adjustStockBy, updateProduct } = useMarket();
+  const { products, stockMovements, suppliers, adjustStockBy, addPurchase } = useMarket();
   const [giren, setGiren] = useState(null); // product being stocked in
   const [cixan, setCixan] = useState(null); // product being written off
   const [miqdar, setMiqdar] = useState("");
@@ -2495,6 +2496,7 @@ function StokPage() {
   // end) — applied only to the payable total, never written back onto the
   // per-product alış qiyməti.
   const [qebulEndirim, setQebulEndirim] = useState("");
+  const [qebulTedarukcu, setQebulTedarukcu] = useState("");
   // Same rationale as MehsullarPage: a large catalog import can put tens of
   // thousands of rows here, and rendering them all at once freezes the tab.
   const [page, setPage] = useState(0);
@@ -2563,6 +2565,7 @@ function StokPage() {
     setQebulBarkod("");
     setQebulError("");
     setQebulEndirim("");
+    setQebulTedarukcu("");
     setQebulOpen(true);
   };
 
@@ -2640,26 +2643,22 @@ function StokPage() {
   const qebulEndirimPct = Number(qebulEndirim) || 0;
   const qebulOdeniler = round2(qebulTotal * (1 - qebulEndirimPct / 100));
 
-  // Applies every row as a stock-in movement, and only touches prices for
-  // rows where the entered value actually differs from the product's
-  // current price — avoids a no-op PUT (and a spurious edit trail) for
-  // rows the user left untouched.
+  // Saved as one purchase record (tədarükçü + line items + the invoice
+  // discount) in a single request — the server applies every line's stock-in
+  // and price update, and the record then shows up under that supplier's
+  // own purchase history in TechizatcilarPage.
   const saveQebul = async () => {
     if (qebulRows.length === 0) return;
+    if (!qebulTedarukcu.trim()) { setQebulError("Təchizatçı adını daxil edin."); return; }
     setQebulSaving(true);
     setQebulError("");
-    for (const r of qebulRows) {
-      const n = Number(r.miqdar);
-      if (!n || n <= 0) continue;
-      const ok = await adjustStockBy(r.kod, n, "Mal qəbulu");
-      if (!ok) { setQebulError(`"${r.ad}" üçün yadda saxlanmadı — serverlə əlaqəni yoxlayın.`); setQebulSaving(false); return; }
-      const current = products.find((p) => p.kod === r.kod);
-      const patch = {};
-      if (current && Number(r.alish) !== current.alish) patch.alish = Number(r.alish);
-      if (current && Number(r.satish) !== current.satish) patch.satish = Number(r.satish);
-      if (Object.keys(patch).length > 0) await updateProduct(r.kod, patch);
-    }
+    const ok = await addPurchase({
+      tedarukcu: qebulTedarukcu.trim(),
+      items: qebulRows.map((r) => ({ kod: r.kod, miqdar: Number(r.miqdar), alish: Number(r.alish), satish: Number(r.satish) })),
+      endirimPct: qebulEndirimPct,
+    });
     setQebulSaving(false);
+    if (!ok) { setQebulError("Yadda saxlanmadı — serverlə əlaqəni yoxlayın."); return; }
     setQebulOpen(false);
   };
 
@@ -2824,6 +2823,18 @@ function StokPage() {
       {qebulOpen && (
         <Modal title="Mal qəbulu" onClose={() => setQebulOpen(false)} widthClass="max-w-2xl">
           <div className="space-y-4">
+            <div>
+              <FormField
+                label="Təchizatçı"
+                value={qebulTedarukcu}
+                onChange={(e) => setQebulTedarukcu(e.target.value)}
+                list="qebul-tedarukcu-list"
+                placeholder="Təchizatçı adı"
+              />
+              <datalist id="qebul-tedarukcu-list">
+                {suppliers.map((s) => <option key={s.ad} value={s.ad} />)}
+              </datalist>
+            </div>
             <FormField
               label="Barkodu skan edin və ya daxil edin"
               value={qebulBarkod}
@@ -2923,7 +2934,7 @@ function StokPage() {
               </button>
               <button
                 onClick={saveQebul}
-                disabled={qebulRows.length === 0 || qebulSaving}
+                disabled={qebulRows.length === 0 || qebulSaving || !qebulTedarukcu.trim()}
                 className="py-2.5 px-6 bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl font-bold text-sm"
               >
                 {qebulSaving ? "Saxlanılır..." : "Yadda saxla"}
@@ -3586,10 +3597,11 @@ function IscilerPage() {
 const emptySupplierForm = { ad: "", tel: "", meblegh: "", borc: "0", status: "Aktiv" };
 
 function TechizatcilarPage() {
-  const { suppliers, addSupplier, updateSupplier, deleteSupplier } = useMarket();
+  const { suppliers, purchases, addSupplier, updateSupplier, deleteSupplier } = useMarket();
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(emptySupplierForm);
+  const [detailSupplier, setDetailSupplier] = useState(null); // supplier whose purchase history is open
 
   const openAdd = () => {
     setEditing(null);
@@ -3646,7 +3658,11 @@ function TechizatcilarPage() {
           <tbody>
             {suppliers.map((s) => (
               <tr key={s.ad} className="border-t border-gray-100">
-                <td className="py-3 px-4 font-medium">{s.ad}</td>
+                <td className="py-3 px-4 font-medium">
+                  <button onClick={() => setDetailSupplier(s.ad)} className="text-left hover:text-green-700 hover:underline">
+                    {s.ad}
+                  </button>
+                </td>
                 <td className="py-3 px-4 text-gray-500">{s.tel}</td>
                 <td className="py-3 px-4">{s.sonAlish}</td>
                 <td className="py-3 px-4 font-semibold">{fmt(s.meblegh)} AZN</td>
@@ -3699,6 +3715,48 @@ function TechizatcilarPage() {
                 Yadda saxla
               </button>
             </div>
+          </div>
+        </Modal>
+      )}
+
+      {detailSupplier && (
+        <Modal title={`Alışlar — ${detailSupplier}`} onClose={() => setDetailSupplier(null)} widthClass="max-w-2xl">
+          <div className="space-y-3 max-h-[65vh] overflow-y-auto">
+            {(purchases || []).filter((p) => p.tedarukcu === detailSupplier).length === 0 && (
+              <div className="text-xs text-gray-400 text-center py-8">Bu təchizatçıdan hələ mal qəbulu qeydə alınmayıb.</div>
+            )}
+            {(purchases || [])
+              .filter((p) => p.tedarukcu === detailSupplier)
+              .map((p) => (
+                <div key={p.id} className="border border-gray-200 rounded-xl overflow-hidden">
+                  <div className="bg-gray-50 px-4 py-2 flex items-center justify-between text-xs">
+                    <span className="font-semibold text-gray-600">{p.tarix}</span>
+                    <span>
+                      {p.endirimPct > 0 && <span className="text-gray-400 line-through mr-2">{fmt(p.cemi)} AZN</span>}
+                      <span className="font-bold">{fmt(p.odeniler)} AZN</span>
+                      {p.endirimPct > 0 && <span className="text-green-600 ml-1">(-{p.endirimPct}%)</span>}
+                    </span>
+                  </div>
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-gray-400">
+                        <th className="py-1.5 px-4">Mal</th><th className="py-1.5 px-4">Miqdar</th>
+                        <th className="py-1.5 px-4">Qiymət</th><th className="py-1.5 px-4">Məbləğ</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {p.items.map((it, i) => (
+                        <tr key={i} className="border-t border-gray-100">
+                          <td className="py-1.5 px-4">{it.ad}</td>
+                          <td className="py-1.5 px-4">{it.miqdar}</td>
+                          <td className="py-1.5 px-4">{fmt(it.alish)} AZN</td>
+                          <td className="py-1.5 px-4 font-semibold">{fmt(it.mebleg)} AZN</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
           </div>
         </Modal>
       )}
@@ -3810,7 +3868,7 @@ function TereziPage() {
 }
 
 function BackupPage() {
-  const { products, sales, employees, suppliers, settings, setSettings, restoreBackup } = useMarket();
+  const { products, sales, employees, suppliers, stockMovements, purchases, settings, setSettings, restoreBackup } = useMarket();
   const [restoring, setRestoring] = useState(false);
   const [msg, setMsg] = useState(null);
   const [autoBusy, setAutoBusy] = useState(false);
@@ -3837,7 +3895,7 @@ function BackupPage() {
   };
 
   const download = () => {
-    const payload = { products, sales, employees, suppliers, settings, yaradilmaTarixi: new Date().toISOString() };
+    const payload = { products, sales, employees, suppliers, stockMovements, purchases, settings, yaradilmaTarixi: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
