@@ -4126,15 +4126,17 @@ function playBeep() {
   }
 }
 
+// iOS (Safari and Chrome-on-iOS both run on WebKit) has no native
+// BarcodeDetector — every scan there runs through html5-qrcode's bundled
+// zxing-js decoder, which tries every format in this list against every
+// frame. Kept to the formats real retail barcodes actually use; every
+// extra format here is directly extra per-frame latency on iOS.
 const BARCODE_FORMATS = [
   Html5QrcodeSupportedFormats.EAN_13,
   Html5QrcodeSupportedFormats.EAN_8,
   Html5QrcodeSupportedFormats.UPC_A,
   Html5QrcodeSupportedFormats.UPC_E,
   Html5QrcodeSupportedFormats.CODE_128,
-  Html5QrcodeSupportedFormats.CODE_39,
-  Html5QrcodeSupportedFormats.CODABAR,
-  Html5QrcodeSupportedFormats.ITF,
 ];
 
 // Continuous camera scanning: stays open across scans (the whole point —
@@ -4190,17 +4192,24 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
         // videoConstraints instead.
         { facingMode: "environment" },
         {
-          fps: 15,
+          // On the (iOS) JS-decoder fallback path, each attempted decode
+          // takes longer than 1000/15ms — asking for more frames per
+          // second than the decoder can actually keep up with just queues
+          // up stale frames instead of scanning faster. 10 is
+          // html5-qrcode's own recommended default.
+          fps: 10,
           // A short, wide box matches a barcode's actual proportions (a
-          // barcode is much wider than it is tall) — a near-square box
-          // just wastes scan area outside where the bars actually sit.
-          qrbox: { width: 300, height: 120 },
+          // barcode is much wider than it is tall) — smaller also means
+          // fewer pixels to run the decoder over per frame, which matters
+          // a lot on the slower JS fallback.
+          qrbox: { width: 260, height: 100 },
           disableFlip: true,
           aspectRatio: 1.777,
-          // Ask for at least 1080p so there's enough detail to resolve a
-          // barcode's fine bars from a normal holding distance — an
-          // unconstrained request lets some phones pick a coarse stream.
-          videoConstraints: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+          // 1080p was overkill for the JS decoder — scanning a bigger frame
+          // takes proportionally longer with no real accuracy gain past
+          // what's needed to resolve a barcode's bars at normal holding
+          // distance. 720p decodes noticeably faster on mid-range phones.
+          videoConstraints: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
         },
         (decodedText) => {
           const now = Date.now();
