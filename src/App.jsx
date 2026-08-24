@@ -4411,11 +4411,85 @@ function UnknownBarcodeCard({ kod, onAdded, onDismiss }) {
 // a purely local tally, so a half-finished count survives a page reload.
 const SAYIM_DRAFT_KEY = "zehra_sayim_draft";
 
+const SAYIM_TARIXCE_SEHIFE = 50;
+
+// Admin (desktop) doesn't need its own camera — counting happens on the
+// phone (Telefon/Skaner role). This page is a read-only history of every
+// "Stok sayımı" confirm made from a phone, so the shop can review what was
+// counted and how stock changed as a result.
 function StokSayimiPage() {
+  const { stockMovements } = useMarket();
+  const [page, setPage] = useState(0);
+
+  const sayimHereketleri = useMemo(
+    () => (stockMovements || []).filter((m) => (m.sebeb || "").startsWith("Sayım")),
+    [stockMovements]
+  );
+  const pageCount = Math.max(1, Math.ceil(sayimHereketleri.length / SAYIM_TARIXCE_SEHIFE));
+  const clampedPage = Math.min(page, pageCount - 1);
+  const paged = sayimHereketleri.slice(clampedPage * SAYIM_TARIXCE_SEHIFE, (clampedPage + 1) * SAYIM_TARIXCE_SEHIFE);
+
   return (
-    <div className="max-w-md mx-auto">
+    <div>
       <PageHeader title="Stok sayımı" />
-      <StokSayimiBody />
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-100 font-bold text-sm text-gray-600">SAYIM TARİXÇƏSİ</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-gray-400 text-xs">
+              <th className="py-2 px-5">Tarix</th>
+              <th className="py-2 px-5">Məhsul</th>
+              <th className="py-2 px-5">Dəyişmə</th>
+              <th className="py-2 px-5">Təfsilat</th>
+              <th className="py-2 px-5">Yeni qalıq</th>
+            </tr>
+          </thead>
+          <tbody>
+            {paged.map((m) => (
+              <tr key={m.id} className="border-t border-gray-100">
+                <td className="py-3 px-5 text-gray-500">{m.tarix}</td>
+                <td className="py-3 px-5 font-medium">{m.ad}</td>
+                <td className={`py-3 px-5 font-semibold ${m.tip === "Giriş" ? "text-green-600" : "text-red-600"}`}>
+                  {m.tip === "Giriş" ? "+" : "-"}{m.miqdar}
+                </td>
+                <td className="py-3 px-5 text-xs text-gray-400">{m.sebeb}</td>
+                <td className="py-3 px-5 font-semibold">{m.qaliq}</td>
+              </tr>
+            ))}
+            {sayimHereketleri.length === 0 && (
+              <tr>
+                <td colSpan={5} className="py-8 text-center text-gray-400">
+                  Hələ heç bir sayım qeydə alınmayıb — telefonda "Stok sayımı" bölməsindən edilən sayımlar burada görünəcək.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        {sayimHereketleri.length > 0 && (
+          <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 text-xs text-gray-500">
+            <div>
+              {clampedPage * SAYIM_TARIXCE_SEHIFE + 1}–{Math.min((clampedPage + 1) * SAYIM_TARIXCE_SEHIFE, sayimHereketleri.length)} / {sayimHereketleri.length}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPage((pg) => Math.max(0, pg - 1))}
+                disabled={clampedPage === 0}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                « Əvvəlki
+              </button>
+              <span className="font-semibold">{clampedPage + 1} / {pageCount}</span>
+              <button
+                onClick={() => setPage((pg) => Math.min(pageCount - 1, pg + 1))}
+                disabled={clampedPage >= pageCount - 1}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                Sonrakı »
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
