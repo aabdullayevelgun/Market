@@ -4179,7 +4179,10 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
     // them by default. Off now that plain decoding is reliable, and an
     // explicit small gap between attempts gives the UI thread room to
     // breathe between them instead of decoding back-to-back at max rate.
-    const reader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 150, delayBetweenScanSuccess: rescanDelayMs });
+    // 150ms was too cautious — noticeably delayed how fast a code in view
+    // actually got picked up. Without TRY_HARDER each attempt is light
+    // enough that a much shorter gap still leaves the UI thread fine.
+    const reader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 50, delayBetweenScanSuccess: rescanDelayMs });
 
     reader
       .decodeFromConstraints(
