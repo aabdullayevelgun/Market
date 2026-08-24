@@ -4341,7 +4341,7 @@ function StokSayimiPage() {
 // mobile "Telefon (Skaner)" role (see TelefonSkanerApp) can reuse it with
 // its own header/chrome instead of the desktop admin PageHeader.
 function StokSayimiBody() {
-  const { products, settings, confirmStockCount, pendingSayimCount } = useMarket();
+  const { products, settings, confirmStockCount, pendingSayimCount, loading } = useMarket();
   const [rows, setRows] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem(SAYIM_DRAFT_KEY) || "[]");
@@ -4404,19 +4404,29 @@ function StokSayimiBody() {
           {pendingSayimCount} sayım hələ serverə göndərilməyib — əlaqə bərpa olunanda avtomatik göndəriləcək.
         </div>
       )}
-      <BarcodeScannerView
-        onDecode={(code) => {
-          const { product, gram } = resolveScannedProduct(code, products, settings);
-          if (!product) {
-            setUnknownKod(code);
-            setLastScanned(null);
-            return;
-          }
-          setUnknownKod(null);
-          setLastScanned(product);
-          addOrBumpRow(product, gram != null ? gram / 1000 : null);
-        }}
-      />
+      {loading || products.length === 0 ? (
+        // Scanning before the catalog's first /api/state fetch finishes
+        // made every barcode look "unknown" — not because it wasn't in the
+        // catalog, but because the catalog hadn't arrived yet. Blocking the
+        // scanner until it has removes that false negative entirely.
+        <div className="rounded-2xl bg-black/5 text-center py-16 text-sm text-gray-500 font-semibold">
+          Kataloq yüklənir...
+        </div>
+      ) : (
+        <BarcodeScannerView
+          onDecode={(code) => {
+            const { product, gram } = resolveScannedProduct(code, products, settings);
+            if (!product) {
+              setUnknownKod(code);
+              setLastScanned(null);
+              return;
+            }
+            setUnknownKod(null);
+            setLastScanned(product);
+            addOrBumpRow(product, gram != null ? gram / 1000 : null);
+          }}
+        />
+      )}
 
       {unknownKod && (
         <div className="mt-4">
@@ -4502,7 +4512,7 @@ function QiymetYoxlaPage() {
 
 // Split out for the same reason as StokSayimiBody above.
 function QiymetYoxlaBody() {
-  const { products, settings } = useMarket();
+  const { products, settings, loading } = useMarket();
   const [found, setFound] = useState(null);
   const [unknownKod, setUnknownKod] = useState(null);
 
@@ -4521,7 +4531,13 @@ function QiymetYoxlaBody() {
 
   return (
     <>
-      <BarcodeScannerView onDecode={handleDecode} />
+      {loading || products.length === 0 ? (
+        <div className="rounded-2xl bg-black/5 text-center py-16 text-sm text-gray-500 font-semibold">
+          Kataloq yüklənir...
+        </div>
+      ) : (
+        <BarcodeScannerView onDecode={handleDecode} />
+      )}
 
       {unknownKod && (
         <div className="mt-4">
