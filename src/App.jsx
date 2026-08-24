@@ -4308,12 +4308,16 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
   };
 
   return (
-    <div className="relative rounded-2xl overflow-hidden bg-black" onClick={tapToFocus}>
-      <video ref={videoRef} className="w-full block" style={{ minHeight: 220 }} muted playsInline />
+    // A shorter, fixed-height "scan slit" instead of the full camera feed —
+    // object-fit: cover just crops what's DISPLAYED; ZXing still decodes
+    // from the actual underlying video stream at full resolution regardless
+    // of how small this box is on screen, so this is purely cosmetic.
+    <div className="relative rounded-2xl overflow-hidden bg-black" style={{ height: 170 }} onClick={tapToFocus}>
+      <video ref={videoRef} className="w-full h-full block object-cover" muted playsInline />
       {/* Decorative guide only — ZXing scans the whole frame, this box is
           just showing the user roughly where to aim, not a hard crop. */}
       {!error && (
-        <div className="absolute inset-8 border-2 border-white/70 rounded-xl pointer-events-none" style={{ top: "35%", bottom: "35%" }} />
+        <div className="absolute inset-x-8 top-1/2 -translate-y-1/2 h-16 border-2 border-white/70 rounded-xl pointer-events-none" />
       )}
       {zoomRange && (
         <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-black/60 rounded-full px-1 py-1">
