@@ -2477,7 +2477,7 @@ const CIXIS_SEBEBLERI = ["İtib", "Xarab olub", "Vaxtı bitib", "Oğurlanıb", "
 const STOK_SEHIFE_OLCUSU = 50;
 
 function StokPage() {
-  const { products, stockMovements, suppliers, adjustStockBy, addPurchase } = useMarket();
+  const { products, stockMovements, suppliers, purchases, adjustStockBy, addPurchase } = useMarket();
   const [giren, setGiren] = useState(null); // product being stocked in
   const [cixan, setCixan] = useState(null); // product being written off
   const [miqdar, setMiqdar] = useState("");
@@ -2497,6 +2497,10 @@ function StokPage() {
   // per-product alış qiyməti.
   const [qebulEndirim, setQebulEndirim] = useState("");
   const [qebulTedarukcu, setQebulTedarukcu] = useState("");
+  // Looking up a past goods receipt by its çek nömrəsi (e.g. off a paper
+  // delivery slip) — separate from the qəbul-in-progress state above.
+  const [cekAxtar, setCekAxtar] = useState("");
+  const [cekTapilan, setCekTapilan] = useState(null); // purchase found, or "notfound"
   // Same rationale as MehsullarPage: a large catalog import can put tens of
   // thousands of rows here, and rendering them all at once freezes the tab.
   const [page, setPage] = useState(0);
@@ -2639,6 +2643,13 @@ function StokPage() {
   };
   const removeQebulRow = (kod) => setQebulRows((rows) => rows.filter((r) => r.kod !== kod));
 
+  const searchCek = () => {
+    const code = cekAxtar.trim();
+    if (!code) return;
+    const found = (purchases || []).find((p) => p.cekNo && p.cekNo.toLowerCase() === code.toLowerCase());
+    setCekTapilan(found || "notfound");
+  };
+
   const qebulTotal = qebulRows.reduce((s, r) => s + (Number(r.miqdar) || 0) * (Number(r.alish) || 0), 0);
   const qebulEndirimPct = Number(qebulEndirim) || 0;
   const qebulOdeniler = round2(qebulTotal * (1 - qebulEndirimPct / 100));
@@ -2713,6 +2724,17 @@ function StokPage() {
               <option value="azdan-coxa">Stok: azdan çoxa</option>
               <option value="azalan">Əvvəlcə azalan/bitən</option>
             </select>
+            <input
+              type="text"
+              value={cekAxtar}
+              onChange={(e) => setCekAxtar(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && searchCek()}
+              placeholder="Çek № (M-000001)"
+              className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs w-32 focus:outline-none focus:border-green-400"
+            />
+            <button onClick={searchCek} className="text-xs font-semibold text-gray-500 hover:text-gray-700">
+              <Search size={14} />
+            </button>
             <button onClick={exportMovements} className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 hover:text-gray-700">
               <Download size={14} /> Stok hərəkətləri (Excel)
             </button>
@@ -2941,6 +2963,44 @@ function StokPage() {
               </button>
             </div>
           </div>
+        </Modal>
+      )}
+
+      {cekTapilan && (
+        <Modal
+          title={cekTapilan === "notfound" ? "Çek tapılmadı" : `${cekTapilan.cekNo} — ${cekTapilan.tedarukcu}`}
+          onClose={() => setCekTapilan(null)}
+          widthClass="max-w-lg"
+        >
+          {cekTapilan === "notfound" ? (
+            <div className="text-sm text-gray-500 text-center py-4">Bu nömrə ilə mal qəbulu tapılmadı.</div>
+          ) : (
+            <div className="space-y-3">
+              <div className="text-xs text-gray-500">{cekTapilan.tarix}</div>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-400 text-xs">
+                    <th className="py-1.5">Mal</th><th className="py-1.5">Miqdar</th>
+                    <th className="py-1.5">Qiymət</th><th className="py-1.5">Məbləğ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cekTapilan.items.map((it, i) => (
+                    <tr key={i} className="border-t border-gray-100">
+                      <td className="py-1.5">{it.ad}</td>
+                      <td className="py-1.5">{it.miqdar}</td>
+                      <td className="py-1.5">{fmt(it.alish)} AZN</td>
+                      <td className="py-1.5 font-semibold">{fmt(it.mebleg)} AZN</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="flex items-center justify-between border-t border-gray-100 pt-3 text-sm font-bold">
+                <span>Ödəniləcək</span>
+                <span>{fmt(cekTapilan.odeniler)} AZN{cekTapilan.endirimPct > 0 ? ` (-${cekTapilan.endirimPct}%)` : ""}</span>
+              </div>
+            </div>
+          )}
         </Modal>
       )}
     </div>
@@ -3730,7 +3790,7 @@ function TechizatcilarPage() {
               .map((p) => (
                 <div key={p.id} className="border border-gray-200 rounded-xl overflow-hidden">
                   <div className="bg-gray-50 px-4 py-2 flex items-center justify-between text-xs">
-                    <span className="font-semibold text-gray-600">{p.tarix}</span>
+                    <span className="font-semibold text-gray-600">{p.cekNo ? `${p.cekNo} — ` : ""}{p.tarix}</span>
                     <span>
                       {p.endirimPct > 0 && <span className="text-gray-400 line-through mr-2">{fmt(p.cemi)} AZN</span>}
                       <span className="font-bold">{fmt(p.odeniler)} AZN</span>

@@ -440,8 +440,14 @@ function startServer(userDataDir, port = 4000, onError) {
     const pct = Number(endirimPct) || 0;
     cemi = Math.round((cemi + Number.EPSILON) * 100) / 100;
     const odeniler = Math.round((cemi * (1 - pct / 100) + Number.EPSILON) * 100) / 100;
+    // Its own sequence (separate from sales' "#000921"-style receipt
+    // numbers) — this is what a Kassa/warehouse person reads off a paper
+    // delivery slip and later types in to pull the goods list back up.
+    const cekNums = data.purchases.map((p) => parseInt(String(p.cekNo || "").replace("M-", ""), 10)).filter((n) => !isNaN(n));
+    const cekNo = "M-" + String((cekNums.length ? Math.max(...cekNums) : 0) + 1).padStart(6, "0");
     const purchase = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      cekNo,
       tarix: nowStr(),
       tedarukcu: String(tedarukcu).trim(),
       items: savedItems,
