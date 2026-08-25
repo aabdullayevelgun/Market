@@ -1,12 +1,5 @@
 {
   "appId": "az.zehramarket.skaner",
   "appName": "Zəhra Skaner",
-  "webDir": "dist",
-  "server": {
-    "url": "https://admin.tail679c6e.ts.net",
-    "cleartext": false
-  },
-  "android": {
-    "allowMixedContent": false
-  }
+  "webDir": "dist"
 }
