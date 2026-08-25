@@ -4161,6 +4161,14 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
   // gets more pixels on the bars without fighting the lens's own limits.
   const [zoom, setZoom] = useState(null);
   const [zoomRange, setZoomRange] = useState(null); // { min, max, step }
+  // Fallback when the platform reports no real (hardware) zoom capability —
+  // seen on the packaged Android app's WebView, which supports torch but
+  // not zoom via getUserMedia even though a full mobile browser on the same
+  // phone does. A CSS scale doesn't add any actual pixel detail for the
+  // decoder the way real optical/sensor zoom does, but it does let the user
+  // see and aim at a small barcode precisely, which still meaningfully
+  // helps them find the right holding distance.
+  const [cssZoom, setCssZoom] = useState(1);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -4298,16 +4306,25 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
 
   const stepZoom = async (e, dir) => {
     e.stopPropagation(); // don't also trigger tapToFocus on the container
-    if (!zoomRange || zoom == null) return;
-    const next = Math.max(zoomRange.min, Math.min(zoomRange.max, zoom + dir * zoomRange.step * 5));
-    try {
-      const track = videoRef.current && videoRef.current.srcObject && videoRef.current.srcObject.getVideoTracks()[0];
-      if (!track) return;
-      await track.applyConstraints({ advanced: [{ zoom: next }] });
-      setZoom(next);
-    } catch {
-      // Ignore — device reported zoom support but rejected the constraint.
+    // Real (hardware) zoom when the platform actually reports it — this
+    // path gets more genuine pixel detail on the barcode's bars.
+    if (zoomRange && zoom != null) {
+      const next = Math.max(zoomRange.min, Math.min(zoomRange.max, zoom + dir * zoomRange.step * 5));
+      try {
+        const track = videoRef.current && videoRef.current.srcObject && videoRef.current.srcObject.getVideoTracks()[0];
+        if (track) {
+          await track.applyConstraints({ advanced: [{ zoom: next }] });
+          setZoom(next);
+          return;
+        }
+      } catch {
+        // Fall through to the CSS fallback below.
+      }
     }
+    // CSS fallback (packaged Android app's WebView reports no zoom
+    // capability at all) — see cssZoom's declaration for why this still
+    // helps despite not adding real decode resolution.
+    setCssZoom((z) => Math.max(1, Math.min(3, round2(z + dir * 0.25))));
   };
 
   return (
@@ -4316,23 +4333,29 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
     // from the actual underlying video stream at full resolution regardless
     // of how small this box is on screen, so this is purely cosmetic.
     <div className="relative rounded-2xl overflow-hidden bg-black" style={{ height: 170 }} onClick={tapToFocus}>
-      <video ref={videoRef} className="w-full h-full block object-cover" muted playsInline />
+      <video
+        ref={videoRef}
+        className="w-full h-full block object-cover"
+        style={zoomRange ? undefined : { transform: `scale(${cssZoom})`, transformOrigin: "center" }}
+        muted
+        playsInline
+      />
       {/* Decorative guide only — ZXing scans the whole frame, this box is
           just showing the user roughly where to aim, not a hard crop. */}
       {!error && (
         <div className="absolute inset-x-8 top-1/2 -translate-y-1/2 h-16 border-2 border-white/70 rounded-xl pointer-events-none" />
       )}
-      {zoomRange && (
-        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-black/60 rounded-full px-1 py-1">
-          <button onClick={(e) => stepZoom(e, -1)} className="text-white w-8 h-8 rounded-full flex items-center justify-center text-lg font-bold">
-            −
-          </button>
-          <span className="text-white text-xs font-mono w-10 text-center">{zoom != null ? `${zoom.toFixed(1)}x` : ""}</span>
-          <button onClick={(e) => stepZoom(e, 1)} className="text-white w-8 h-8 rounded-full flex items-center justify-center text-lg font-bold">
-            +
-          </button>
-        </div>
-      )}
+      <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-black/60 rounded-full px-1 py-1">
+        <button onClick={(e) => stepZoom(e, -1)} className="text-white w-8 h-8 rounded-full flex items-center justify-center text-lg font-bold">
+          −
+        </button>
+        <span className="text-white text-xs font-mono w-10 text-center">
+          {zoomRange ? (zoom != null ? `${zoom.toFixed(1)}x` : "") : `${cssZoom.toFixed(2)}x`}
+        </span>
+        <button onClick={(e) => stepZoom(e, 1)} className="text-white w-8 h-8 rounded-full flex items-center justify-center text-lg font-bold">
+          +
+        </button>
+      </div>
       {torchSupported && (
         <button
           onClick={toggleTorch}
