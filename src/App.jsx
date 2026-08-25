@@ -765,12 +765,25 @@ function RoleSetup({ onDone }) {
               </div>
             )}
             <div className="space-y-3">
-              <FormField label="IP və ya ünvan" placeholder="192.168.1.15 və ya admin.tailXXXX.ts.net" value={ip} onChange={(e) => setIp(e.target.value)} />
+              <FormField
+                label="IP və ya ünvan"
+                placeholder="192.168.1.15 və ya admin.tailXXXX.ts.net"
+                value={ip}
+                onChange={(e) => setIp(e.target.value)}
+                autoCapitalize="none"
+                autoCorrect="off"
+                autoComplete="off"
+                spellCheck="false"
+              />
               <FormField
                 label="Token"
                 placeholder="Admin ekranında göstərilən kod"
                 value={tokenInput}
                 onChange={(e) => setTokenInput(e.target.value.toUpperCase())}
+                autoCapitalize="characters"
+                autoCorrect="off"
+                autoComplete="off"
+                spellCheck="false"
               />
               <FormField
                 label="Admin şifrəsi"
@@ -778,9 +791,17 @@ function RoleSetup({ onDone }) {
                 placeholder="Sayımı təsdiqləmək üçün lazımdır"
                 value={pwInput}
                 onChange={(e) => setPwInput(e.target.value)}
+                autoCapitalize="none"
+                autoCorrect="off"
+                autoComplete="off"
+                spellCheck="false"
               />
             </div>
-            {testError && <div className="text-red-500 text-xs font-semibold mt-2">{testError}</div>}
+            {testError && (
+              <div className="text-red-500 text-xs font-semibold mt-2 break-all">
+                {testError}
+              </div>
+            )}
             <div className="flex gap-2 mt-4">
               <button onClick={() => setStep("choose")} className="flex-1 py-2.5 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
                 Geri
