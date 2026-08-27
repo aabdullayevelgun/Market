@@ -32,26 +32,27 @@ async function getOrCreateHttpsCert(userDataDir) {
   const ipsFile = path.join(userDataDir, "https-cert-ips.json");
 
   // A laptop moving between networks (shop, home, ...) gets a different
-  // DHCP IP each time — the cert's SAN has to actually list whichever IP
-  // the phone is connecting to, or the browser refuses the connection
-  // outright (unlike the "not secure" warning, a SAN mismatch has no
-  // "proceed anyway" option on most browsers). Every IP this has ever run
-  // under gets accumulated into the same cert instead of overwritten, so a
-  // phone that already trusted this cert on one network doesn't have to
-  // redo the whole install-and-trust dance after going to another.
+  // DHCP IP each time. This used to mean regenerating the cert (a brand
+  // new key + cert object, hence a new fingerprint) every time a genuinely
+  // new IP showed up, which silently invalidated every phone's existing
+  // "trust this certificate" decision — the whole install-and-trust dance
+  // had to be redone from scratch, repeatedly, forever. Fixed: the cert is
+  // now generated exactly once and never touched again. Phones are meant
+  // to connect via the fixed "zehra-market.local" mDNS hostname (see the
+  // responder started in startServer below) instead of a raw IP, so the
+  // cert's SAN never actually needs to track the current address — trust
+  // it once, and it stays valid across every future IP change.
   let knownIps = [];
   try {
     knownIps = JSON.parse(fs.readFileSync(ipsFile, "utf-8"));
   } catch {
     knownIps = [];
   }
-  const currentIp = getLocalIp();
-  const needsNewIp = currentIp && !knownIps.includes(currentIp);
-
-  if (fs.existsSync(keyFile) && fs.existsSync(certFile) && !needsNewIp) {
+  if (fs.existsSync(keyFile) && fs.existsSync(certFile)) {
     return { key: fs.readFileSync(keyFile), cert: fs.readFileSync(certFile) };
   }
-  if (needsNewIp) knownIps.push(currentIp);
+  const currentIp = getLocalIp();
+  if (currentIp && !knownIps.includes(currentIp)) knownIps.push(currentIp);
 
   const selfsigned = require("selfsigned");
   const attrs = [{ name: "commonName", value: "zehra-market.local" }];
@@ -99,11 +100,37 @@ function isLocalRequest(req) {
 // "Telefon (Skaner)" role), reachable only by devices already inside this
 // specific private tailnet — nobody outside it can get DNS or a cert for
 // it, so it's exactly as trustworthy as a bare LAN IP.
-const TRUSTED_ORIGIN_RE = /^https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.ts\.net$|^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|(\d{1,3}\.){3}\d{1,3})(:\d+)?$/i;
+// The old version of this regex accepted ANY dotted-quad as "trusted" —
+// `(\d{1,3}\.){3}\d{1,3}` matches a public IP just as happily as a LAN one,
+// which defeated the whole point: a page served from any public address
+// (e.g. an attacker's VPS) got a matching Origin header, so a victim's
+// browser on the same LAN as the Admin PC could still have its background
+// fetch() sail through this gate. Origins are now checked structurally
+// (ts.net / localhost / the mDNS hostname) or, for a bare IP, validated
+// against the actual private-range list below — a public IP no longer
+// matches no matter how it's shaped.
+const TS_NET_ORIGIN_RE = /^https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.ts\.net$/i;
+const LOCAL_ORIGIN_RE = /^https?:\/\/(localhost|\[::1\]|zehra-market\.local)(:\d+)?$/i;
+const IP_ORIGIN_RE = /^https?:\/\/((?:\d{1,3}\.){3}\d{1,3})(:\d+)?$/i;
+
+function isPrivateIp(ip) {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return false;
+  const [a, b] = parts;
+  if (a === 127) return true; // loopback
+  if (a === 10) return true; // 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16
+  if (a === 100 && b >= 64 && b <= 127) return true; // Tailscale CGNAT range
+  return false;
+}
+
 function isTrustedOrigin(req) {
   const origin = req.headers.origin;
   if (!origin || origin === "null") return true; // file:// app, or a non-browser caller
-  return TRUSTED_ORIGIN_RE.test(origin);
+  if (TS_NET_ORIGIN_RE.test(origin) || LOCAL_ORIGIN_RE.test(origin)) return true;
+  const ipMatch = origin.match(IP_ORIGIN_RE);
+  return !!ipMatch && isPrivateIp(ipMatch[1]);
 }
 
 // The Admin PC (physically trusted, talks to its own server over loopback)
@@ -116,6 +143,23 @@ function isAdminAuthorized(req, data) {
   if (isLocalRequest(req)) return true;
   const pw = req.header("x-admin-password");
   return !!pw && !!data.settings.adminSifre && pw === data.settings.adminSifre;
+}
+
+// Strips every plaintext secret (admin password, scanner-login passwords,
+// employee Növbə passwords) before a non-admin caller sees the response.
+// /api/state already did this for GET, but several write routes that are
+// reachable WITHOUT admin rights (a plain Kassa sale, a return) used to
+// `res.json(data)` the raw object straight back — which meant a Kassa or
+// Telefon device, on every single sale it made, got the admin password and
+// every other device's password back in that same response. Route
+// responses should go through this instead of res.json(data) directly
+// unless the route already required admin.
+function sanitizeForNonAdmin(req, data) {
+  if (isAdminAuthorized(req, data)) return data;
+  const { adminSifre, ...safeSettings } = data.settings;
+  const safeScannerUsers = (data.scannerUsers || []).map((u) => ({ username: u.username }));
+  const safeEmployees = (data.employees || []).map(({ sifre, ...rest }) => rest);
+  return { ...data, settings: safeSettings, scannerUsers: safeScannerUsers, employees: safeEmployees };
 }
 
 // Wrong-password attempts against the admin gate are not rate-limited by
@@ -162,6 +206,44 @@ function requireAdmin(req, res, data) {
   adminAttempts.set(ip, entry);
   res.status(403).json({ error: "Admin şifrəsi tələb olunur." });
   return false;
+}
+
+// Same brute-force protection as the admin gate above, but for scanner
+// (phone) login — this endpoint has to be reachable without the LAN token
+// first (that's the whole point, the phone doesn't have it yet), so it
+// needs its own lockout instead of relying on the token check to keep
+// guessing attempts rare.
+const scannerAttempts = new Map(); // ip -> { count, blockedUntil }
+function isScannerLoginBlocked(ip) {
+  const entry = scannerAttempts.get(ip);
+  if (!entry || !entry.blockedUntil) return false;
+  if (entry.blockedUntil > Date.now()) return true;
+  scannerAttempts.delete(ip);
+  return false;
+}
+function recordScannerLoginFailure(ip) {
+  const entry = scannerAttempts.get(ip) || { count: 0 };
+  entry.count += 1;
+  if (entry.count >= ADMIN_ATTEMPT_LIMIT) entry.blockedUntil = Date.now() + ADMIN_BLOCK_MS;
+  scannerAttempts.set(ip, entry);
+}
+
+// Same idea again for "Növbəyə başla" (per-cashier shift login) — a Kassa
+// device already holds the LAN token, but that's shared by every cashier,
+// so this is its own password check with its own lockout.
+const shiftAttempts = new Map(); // ip -> { count, blockedUntil }
+function isShiftLoginBlocked(ip) {
+  const entry = shiftAttempts.get(ip);
+  if (!entry || !entry.blockedUntil) return false;
+  if (entry.blockedUntil > Date.now()) return true;
+  shiftAttempts.delete(ip);
+  return false;
+}
+function recordShiftLoginFailure(ip) {
+  const entry = shiftAttempts.get(ip) || { count: 0 };
+  entry.count += 1;
+  if (entry.count >= ADMIN_ATTEMPT_LIMIT) entry.blockedUntil = Date.now() + ADMIN_BLOCK_MS;
+  shiftAttempts.set(ip, entry);
 }
 
 // Tailscale's virtual adapter hands out addresses in 100.64.0.0/10 (CGNAT
@@ -262,6 +344,8 @@ function loadData(dataFile) {
   if (!Array.isArray(data.stockMovements)) data.stockMovements = [];
   if (!Array.isArray(data.purchases)) data.purchases = [];
   if (!Array.isArray(data.priceChanges)) data.priceChanges = [];
+  if (!Array.isArray(data.scannerUsers)) data.scannerUsers = [];
+  if (!Array.isArray(data.shifts)) data.shifts = [];
   return data;
 }
 
@@ -328,7 +412,7 @@ function startServer(userDataDir, port = 4000, onError) {
   // phone could never reach the RoleSetup screen where the token is entered
   // in the first place.
   app.use((req, res, next) => {
-    if (!req.path.startsWith("/api/") || req.path === "/api/ping" || isLocalRequest(req)) return next();
+    if (!req.path.startsWith("/api/") || req.path === "/api/ping" || req.path === "/api/https-cert" || req.path === "/api/scanner-login" || isLocalRequest(req)) return next();
     const data = loadData(dataFile);
     const token = req.header("x-api-token");
     if (token && token === data.settings.apiToken) return next();
@@ -367,14 +451,21 @@ function startServer(userDataDir, port = 4000, onError) {
     // Never let a non-admin caller (a Kassa PC, or anyone else holding just
     // the LAN token) read the admin password in plaintext — that would let
     // them skip the admin-panel password prompt entirely.
-    if (isAdminAuthorized(req, data)) return res.json(data);
-    const { adminSifre, ...safeSettings } = data.settings;
-    res.json({ ...data, settings: safeSettings });
+    res.json(sanitizeForNonAdmin(req, data));
   });
 
   app.post("/api/products", (req, res) => {
     const data = loadData(dataFile);
     if (!requireAdmin(req, res, data)) return;
+    const kod = req.body && req.body.kod;
+    if (!kod) return res.status(400).json({ error: "Barkod (kod) tələb olunur." });
+    // Without this, two products could silently share the same kod — PUT
+    // (uses .map) would then update BOTH at once, while stock/adjust and
+    // purchases (use .find) would only ever touch the first, so the two
+    // "same" products would quietly diverge in stock and price over time.
+    if (data.products.some((p) => p.kod === kod)) {
+      return res.status(400).json({ error: "Bu barkodla məhsul artıq mövcuddur." });
+    }
     data.products.push(req.body);
     saveData(dataFile, data);
     res.json(data);
@@ -455,6 +546,9 @@ function startServer(userDataDir, port = 4000, onError) {
   app.post("/api/employees", (req, res) => {
     const data = loadData(dataFile);
     if (!requireAdmin(req, res, data)) return;
+    if (!req.body || !String(req.body.ad || "").trim()) {
+      return res.status(400).json({ error: "Ad Soyad tələb olunur." });
+    }
     data.employees.unshift(req.body);
     saveData(dataFile, data);
     res.json(data);
@@ -468,16 +562,86 @@ function startServer(userDataDir, port = 4000, onError) {
     res.json(data);
   });
 
+  // Admin resets an employee's Növbə (shift) login password from here —
+  // the only field this route is meant to touch, though it merges whatever
+  // else is sent too for consistency with the other PUT routes.
+  app.put("/api/employees/:ad", (req, res) => {
+    const data = loadData(dataFile);
+    if (!requireAdmin(req, res, data)) return;
+    const target = decodeURIComponent(req.params.ad);
+    const idx = data.employees.findIndex((e) => e.ad === target);
+    if (idx < 0) return res.status(404).json({ error: "İşçi tapılmadı." });
+    data.employees[idx] = { ...data.employees[idx], ...req.body };
+    saveData(dataFile, data);
+    res.json(data);
+  });
+
+  // Named login for a Telefon (Skaner) device — Admin creates a
+  // username/password pair here instead of the phone needing the raw LAN
+  // token (an opaque code that has to be copied character-for-character).
+  // Managed from Admin, so it's admin-gated like employees/suppliers.
+  app.post("/api/scanner-users", (req, res) => {
+    const data = loadData(dataFile);
+    if (!requireAdmin(req, res, data)) return;
+    const { username, password } = req.body || {};
+    if (!username || !String(username).trim() || !password) {
+      return res.status(400).json({ error: "İstifadəçi adı və şifrə tələb olunur." });
+    }
+    const uname = String(username).trim();
+    if (data.scannerUsers.some((u) => u.username.toLowerCase() === uname.toLowerCase())) {
+      return res.status(400).json({ error: "Bu istifadəçi adı artıq mövcuddur." });
+    }
+    data.scannerUsers.unshift({ username: uname, password: String(password) });
+    saveData(dataFile, data);
+    res.json(data);
+  });
+
+  app.delete("/api/scanner-users/:username", (req, res) => {
+    const data = loadData(dataFile);
+    if (!requireAdmin(req, res, data)) return;
+    const target = decodeURIComponent(req.params.username).toLowerCase();
+    data.scannerUsers = data.scannerUsers.filter((u) => u.username.toLowerCase() !== target);
+    saveData(dataFile, data);
+    res.json(data);
+  });
+
+  // Bootstrap login for a phone — no LAN token yet at this point (that's
+  // the whole problem this replaces), so it's exempted from the token-check
+  // middleware above and protected by its own brute-force lockout instead.
+  // On success, hands back the same shared LAN token every other route
+  // already expects in x-api-token — the rest of the app is unchanged.
+  app.post("/api/scanner-login", (req, res) => {
+    const data = loadData(dataFile);
+    const ip = getClientIp(req);
+    if (isScannerLoginBlocked(ip)) {
+      return res.status(429).json({ error: "Çox sayda səhv cəhd. 20 dəqiqə sonra yenidən sınayın." });
+    }
+    const { username, password } = req.body || {};
+    const uname = String(username || "").trim().toLowerCase();
+    const match = data.scannerUsers.find((u) => u.username.toLowerCase() === uname && u.password === password);
+    if (!match) {
+      recordScannerLoginFailure(ip);
+      return res.status(401).json({ error: "İstifadəçi adı və ya şifrə yanlışdır." });
+    }
+    scannerAttempts.delete(ip);
+    res.json({ token: data.settings.apiToken });
+  });
+
   app.post("/api/sales", (req, res) => {
     const data = loadData(dataFile);
     const sale = req.body;
     data.sales.unshift(sale);
     data.products = data.products.map((p) => {
       const item = sale.items.find((i) => i.kod === p.kod);
-      return item ? { ...p, stok: Math.max(0, p.stok - item.miqdar) } : p;
+      // Deliberately allowed to go negative (not clamped to 0): if stock
+      // reads 0 because a delivery hasn't been entered yet but the cashier
+      // still sells the item, the deficit stays visible instead of being
+      // silently absorbed — the next "Mal gəldi" for this product then
+      // nets correctly against the real shortfall instead of resetting it.
+      return item ? { ...p, stok: p.stok - item.miqdar } : p;
     });
     saveData(dataFile, data);
-    res.json(data);
+    res.json(sanitizeForNonAdmin(req, data));
   });
 
   // Reverses a completed sale: gives every line item's quantity back to
@@ -508,7 +672,87 @@ function startServer(userDataDir, port = 4000, onError) {
       });
     });
     saveData(dataFile, data);
-    res.json(data);
+    res.json(sanitizeForNonAdmin(req, data));
+  });
+
+  // "Növbəyə başla" — a cashier picks their own name and types their own
+  // password (set by Admin in İşçilər) instead of every sale on a shared
+  // Kassa terminal being attributed to whatever name happened to be
+  // hardcoded. No admin gate (any cashier can start their own shift) but
+  // its own brute-force lockout, same reasoning as /api/scanner-login: the
+  // Kassa device's LAN token alone doesn't prove which *person* is typing.
+  app.post("/api/shifts/start", (req, res) => {
+    const data = loadData(dataFile);
+    const ip = getClientIp(req);
+    if (isShiftLoginBlocked(ip)) {
+      return res.status(429).json({ error: "Çox sayda səhv cəhd. 20 dəqiqə sonra yenidən sınayın." });
+    }
+    const { kassir, sifre } = req.body || {};
+    const employee = data.employees.find((e) => e.ad === kassir);
+    if (!employee || !employee.sifre || employee.sifre !== sifre) {
+      recordShiftLoginFailure(ip);
+      return res.status(401).json({ error: "Ad və ya şifrə yanlışdır." });
+    }
+    if (data.shifts.some((s) => s.kassir === kassir && s.status === "Aktiv")) {
+      return res.status(400).json({ error: `${kassir} üçün artıq açıq növbə var.` });
+    }
+    shiftAttempts.delete(ip);
+    const shift = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      kassir,
+      baslama: nowStr(),
+      bitme: null,
+      status: "Aktiv",
+    };
+    data.shifts.unshift(shift);
+    saveData(dataFile, data);
+    res.json(sanitizeForNonAdmin(req, data));
+  });
+
+  // "Növbəni bitir" — closes the shift and freezes its totals at this exact
+  // moment (nağd/kart/qaytarma/cəmi), computed from every sale tagged with
+  // this shiftId. Frozen rather than computed live later because the sales
+  // list keeps growing/changing (returns can happen after shift end) — the
+  // end-of-shift receipt should reflect what was true at handover time, not
+  // whatever the numbers happen to be whenever someone looks later.
+  app.post("/api/shifts/:id/close", (req, res) => {
+    const data = loadData(dataFile);
+    const shift = data.shifts.find((s) => s.id === req.params.id);
+    if (!shift) return res.status(404).json({ error: "Növbə tapılmadı." });
+    if (shift.status !== "Aktiv") return res.status(400).json({ error: "Bu növbə artıq bağlanıb." });
+    const shiftSales = data.sales.filter((s) => s.shiftId === shift.id);
+    let nagdCemi = 0;
+    let kartCemi = 0;
+    let qaytarmaCemi = 0;
+    let qaytarmaSayi = 0;
+    let satisSayi = 0;
+    for (const s of shiftSales) {
+      if (s.status === "İadə edilib") {
+        qaytarmaCemi += s.meblegh || 0;
+        qaytarmaSayi += 1;
+        continue;
+      }
+      satisSayi += 1;
+      if (s.method === "qarisiq") {
+        nagdCemi += s.cashPart || 0;
+        kartCemi += s.cardPart || 0;
+      } else if (s.method === "kart") {
+        kartCemi += s.meblegh || 0;
+      } else {
+        nagdCemi += s.meblegh || 0;
+      }
+    }
+    const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+    shift.bitme = nowStr();
+    shift.status = "Bağlı";
+    shift.satisSayi = satisSayi;
+    shift.nagdCemi = round2(nagdCemi);
+    shift.kartCemi = round2(kartCemi);
+    shift.qaytarmaSayi = qaytarmaSayi;
+    shift.qaytarmaCemi = round2(qaytarmaCemi);
+    shift.umumiCemi = round2(nagdCemi + kartCemi - qaytarmaCemi);
+    saveData(dataFile, data);
+    res.json(sanitizeForNonAdmin(req, data));
   });
 
   // Stock-in ("Mal gəldi", delta > 0) and stock-out / write-off ("Stokdan
@@ -519,12 +763,19 @@ function startServer(userDataDir, port = 4000, onError) {
     const data = loadData(dataFile);
     if (!requireAdmin(req, res, data)) return;
     const { kod, delta, reason } = req.body || {};
-    const change = parseInt(delta, 10);
+    // parseInt would silently truncate a weighed product's fractional delta
+    // (e.g. 0.5 kg found/adjusted) down to 0, both losing the adjustment and
+    // failing the !change check below — same class of bug /api/stock/count
+    // already avoids for exactly this reason (see its own comment).
+    const change = Math.round((Number(delta) + Number.EPSILON) * 1000) / 1000;
     if (!kod || !change) return res.status(400).json({ error: "kod və delta tələb olunur." });
     if (change < 0 && !reason) return res.status(400).json({ error: "Stokdan çıxarmaq üçün səbəb tələb olunur." });
     const product = data.products.find((p) => p.kod === kod);
     if (!product) return res.status(404).json({ error: "Məhsul tapılmadı." });
-    product.stok = Math.max(0, (product.stok || 0) + change);
+    // Not clamped to 0 — a partial "Mal gəldi" against a product that's
+    // already negative (oversold while waiting on a delivery) should net
+    // correctly against the real deficit instead of jumping straight to 0.
+    product.stok = (product.stok || 0) + change;
     data.stockMovements.unshift({
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       tarix: nowStr(),
@@ -589,21 +840,25 @@ function startServer(userDataDir, port = 4000, onError) {
   app.post("/api/purchases", (req, res) => {
     const data = loadData(dataFile);
     if (!requireAdmin(req, res, data)) return;
-    const { tedarukcu, items, endirimPct, sened } = req.body || {};
+    const { tedarukcu, items, endirimPct, sened, ekspeditor } = req.body || {};
     if (!tedarukcu || !String(tedarukcu).trim() || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "Təchizatçı adı və ən azı bir mal tələb olunur." });
     }
     const savedItems = [];
     let cemi = 0;
     for (const it of items) {
-      const n = parseInt(it.miqdar, 10);
+      // parseInt would silently drop a weighed product's fractional
+      // quantity (e.g. 2.5 kg received) down to 2 — same fix as
+      // /api/stock/adjust above.
+      const n = Math.round((Number(it.miqdar) + Number.EPSILON) * 1000) / 1000;
       const product = data.products.find((p) => p.kod === it.kod);
       if (!n || n <= 0 || !product) continue;
       const alish = Number(it.alish);
       const satish = Number(it.satish);
       if (!isNaN(alish)) product.alish = alish;
       if (!isNaN(satish)) product.satish = satish;
-      product.stok = Math.max(0, (product.stok || 0) + n);
+      // Not clamped to 0 — same reasoning as /api/stock/adjust above.
+      product.stok = (product.stok || 0) + n;
       data.stockMovements.unshift({
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         tarix: nowStr(),
@@ -633,6 +888,7 @@ function startServer(userDataDir, port = 4000, onError) {
       tarix: nowStr(),
       tedarukcu: String(tedarukcu).trim(),
       sened: sened ? String(sened).trim() : "",
+      ekspeditor: ekspeditor ? String(ekspeditor).trim() : "",
       items: savedItems,
       cemi,
       endirimPct: pct,
@@ -698,6 +954,8 @@ function startServer(userDataDir, port = 4000, onError) {
       stockMovements: Array.isArray(incoming.stockMovements) ? incoming.stockMovements : [],
       purchases: Array.isArray(incoming.purchases) ? incoming.purchases : [],
       priceChanges: Array.isArray(incoming.priceChanges) ? incoming.priceChanges : [],
+      scannerUsers: Array.isArray(incoming.scannerUsers) ? incoming.scannerUsers : [],
+      shifts: Array.isArray(incoming.shifts) ? incoming.shifts : [],
       // apiToken is never replaced by a restore, same reasoning as PUT /api/settings.
       settings:
         incoming.settings && typeof incoming.settings === "object"
@@ -741,6 +999,32 @@ function startServer(userDataDir, port = 4000, onError) {
     .catch((err) => {
       console.error("HTTPS server could not start (Telefon/Skaner role will be unavailable):", err);
     });
+
+  // Answers mDNS ("Bonjour") queries for zehra-market.local with whatever
+  // this machine's current LAN IP actually is, resolved fresh on every
+  // query — not baked in anywhere. This is what lets a phone type a fixed
+  // hostname once and never need to know/retype the real IP again, and
+  // (paired with the cert above no longer regenerating) is what makes the
+  // one-time certificate trust survive the admin computer roaming to a new
+  // IP or network. iOS/macOS resolve .local names out of the box (Bonjour);
+  // most desktop/Android browsers can too where an mDNS resolver is present
+  // — raw-IP entry still works as a fallback for anything that doesn't.
+  try {
+    const mdns = require("multicast-dns")();
+    const HOSTNAME = "zehra-market.local";
+    mdns.on("query", (query) => {
+      const asked = query.questions.some(
+        (q) => q.type === "A" && q.name.toLowerCase() === HOSTNAME
+      );
+      if (!asked) return;
+      const ip = getLocalIp();
+      if (!ip) return;
+      mdns.respond({ answers: [{ name: HOSTNAME, type: "A", ttl: 120, data: ip }] });
+    });
+    mdns.on("error", (err) => console.error("mDNS responder error:", err));
+  } catch (err) {
+    console.error("mDNS responder could not start (zehra-market.local won't resolve):", err);
+  }
 
   return httpServer;
 }

@@ -20,11 +20,12 @@ public class MainActivity extends BridgeActivity {
     // certificate actually presented matches this exact fingerprint.
     //
     // IMPORTANT: this must be updated (and the APK rebuilt) if the server's
-    // certificate is ever regenerated — e.g. the server ran on a genuinely
-    // new LAN IP for the first time (see https-cert-ips.json on the
-    // server). Recompute with:
+    // certificate is ever regenerated. As of 2026-08-25 the server no longer
+    // regenerates it when the LAN IP changes (getOrCreateHttpsCert now
+    // creates it exactly once, ever) — this pin should stay valid
+    // indefinitely from here on. Recompute with:
     //   node -e "const c=require('crypto'),f=require('fs');const p=f.readFileSync('local-data/https-cert.pem','utf-8');const b=Buffer.from(p.replace(/-----(BEGIN|END) CERTIFICATE-----/g,'').replace(/\s+/g,''),'base64');console.log(c.createHash('sha256').update(b).digest('hex').toUpperCase())"
-    private static final String PINNED_CERT_SHA256 = "FFD667D22498E6C952E2FEBD75725AC7D7E2FF6113F640C5EC903CDF34103C7F";
+    private static final String PINNED_CERT_SHA256 = "267B5EBE51962C52975DCD8B1B89BA032044A0629DE825BE5D4D407BD0C1FB2B";
 
     @Override
     public void onCreate(Bundle savedInstanceState) {

@@ -8,4 +8,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   sendTereziPlu: (ip, port, products) => ipcRenderer.invoke("terezi-send-plu", ip, port, products),
   pickBackupFolder: () => ipcRenderer.invoke("backup-pick-folder"),
   runBackupNow: () => ipcRenderer.invoke("backup-run-now"),
+  testEdvConnection: (ip, key) => ipcRenderer.invoke("edv-test-connection", ip, key),
+  sendEdvSale: (ip, key, sale, autoPrint) => ipcRenderer.invoke("edv-sale", ip, key, sale, autoPrint),
 });

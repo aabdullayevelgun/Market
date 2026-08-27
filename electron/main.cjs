@@ -2,6 +2,10 @@ const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const net = require("net");
+const http = require("http");
+const crypto = require("crypto");
+const os = require("os");
+const { execFile } = require("child_process");
 
 const isDev = !app.isPackaged;
 
@@ -283,6 +287,93 @@ ipcMain.handle("terezi-send-plu", async (event, ip, port, products) => {
       resolve({ ok: false, error: err.message });
     });
   });
+});
+
+// ƏDV (eKassam) fiscal terminal integration — real protocol, obtained from
+// the terminal vendor's own published OpenAPI docs (api-doc.ekassam.az)
+// after the COM-port/serial theory (see the now-removed edv-print.ps1
+// experiment) was proven wrong: the terminal is a plain HTTP/JSON server on
+// the LAN, port 9876, base path /api. Auth is stateless per-request — no
+// session/cookie, just three headers recomputed on every single call:
+//   dt    = current datetime as yyyyMMddHHmmss (must be within 50s of the
+//           terminal's own clock, or the whole request is rejected)
+//   nonce = any random string, 8+ chars, must differ every request
+//   token = SHA256(SHA256(dt) + ":" + nonce + ":" + key) — "key" is a
+//           shared secret configured identically on the terminal (entered
+//           once in its own Settings screen) and here (Parametrlər).
+function edvSha256Hex(s) {
+  return crypto.createHash("sha256").update(s, "utf8").digest("hex");
+}
+function edvDt(now) {
+  const p2 = (n) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}${p2(now.getHours())}${p2(now.getMinutes())}${p2(now.getSeconds())}`;
+}
+function edvToken(dt, nonce, key) {
+  return edvSha256Hex(`${edvSha256Hex(dt)}:${nonce}:${key}`);
+}
+
+function edvRequest(ip, key, method, apiPath, body, extraHeaders) {
+  return new Promise((resolve) => {
+    if (!ip || !key) {
+      resolve({ ok: false, error: "Terminal IP və ya açar (key) təyin edilməyib." });
+      return;
+    }
+    const dt = edvDt(new Date());
+    const nonce = crypto.randomBytes(6).toString("hex");
+    const token = edvToken(dt, nonce, key);
+    const payload = body != null ? JSON.stringify(body) : null;
+    const headers = { dt, nonce, token, ...extraHeaders };
+    if (payload) {
+      headers["Content-Type"] = "application/json; charset=UTF-8";
+      headers["Content-Length"] = Buffer.byteLength(payload);
+    }
+    const req = http.request(
+      { hostname: ip, port: 9876, path: `/api${apiPath}`, method, headers, timeout: 6000 },
+      (res) => {
+        let raw = "";
+        res.on("data", (c) => (raw += c));
+        res.on("end", () => {
+          let parsed = null;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            resolve({ ok: false, error: `Naməlum cavab (${res.statusCode}): ${raw.slice(0, 200)}` });
+            return;
+          }
+          if (res.statusCode === 200 && parsed && parsed.code === 0) {
+            resolve({ ok: true, data: parsed.data, raw: parsed });
+          } else {
+            resolve({ ok: false, error: (parsed && parsed.message) || `HTTP ${res.statusCode}`, raw: parsed });
+          }
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve({ ok: false, error: "Terminal cavab vermədi (timeout) — IP düzgündürmü, terminal ekranı açıqdırmı?" });
+    });
+    req.on("error", (err) => resolve({ ok: false, error: err.message }));
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// Quick connectivity check for the Parametrlər "Yoxla" button — GET
+// /kas_login just starts a session; we don't need the returned
+// access_token (per the docs every subsequent request recomputes its own
+// token from scratch), only whether the handshake itself succeeds.
+ipcMain.handle("edv-test-connection", async (event, ip, key) => {
+  return edvRequest(ip, key, "GET", "/kas_login");
+});
+
+// The actual per-sale call. `sale` is a plain object built on the renderer
+// side (App.jsx) matching eKassam's /kas_sale request schema. `autoPrint`
+// (default true, per the docs) lets Market suppress the terminal's own
+// receipt print when the user wants everything on the one thermal printer
+// instead — see `edvMergePrint` in Parametrlər.
+ipcMain.handle("edv-sale", async (event, ip, key, sale, autoPrint) => {
+  const extraHeaders = autoPrint === false ? { "auto-print": "false" } : undefined;
+  return edvRequest(ip, key, "POST", "/kas_sale", sale, extraHeaders);
 });
 
 app.whenReady().then(createWindow);

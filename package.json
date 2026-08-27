@@ -19,6 +19,7 @@
     "@zxing/library": "^0.23.0",
     "express": "^4.19.2",
     "lucide-react": "^0.400.0",
+    "multicast-dns": "^7.2.5",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "recharts": "^2.12.0",

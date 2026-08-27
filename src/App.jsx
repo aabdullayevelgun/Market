@@ -96,6 +96,16 @@ const INITIAL_SETTINGS = {
   adminSifre: "",
   cekBasliqQeydi: "",
   cekTesekkurMesaji: "TƏŞƏKKÜRLƏR!\nXoş gəlmisiniz!",
+  // Experimental ƏDV (fiscal) terminal integration — see edv-print.ps1.
+  edvEnabled: false,
+  edvTerminalIp: "",
+  edvKey: "",
+  // When on, the terminal's own auto-print is suppressed (auto-print:false
+  // header) and the fiscal document number/ID are appended to Market's own
+  // thermal receipt instead — one slip instead of two. Off by default: the
+  // terminal-printed receipt carries the certified fiscal layout (QR code
+  // etc.) that this merged version does not attempt to reproduce.
+  edvMergePrint: false,
 };
 
 const TOP_PRODUCTS = [
@@ -233,11 +243,13 @@ function parseCSV(text) {
 const MarketContext = createContext(null);
 const useMarket = () => useContext(MarketContext);
 
-const emptyState = { products: [], sales: [], employees: [], suppliers: [], stockMovements: [], purchases: [], priceChanges: [], settings: INITIAL_SETTINGS };
+const emptyState = { products: [], sales: [], employees: [], suppliers: [], stockMovements: [], purchases: [], priceChanges: [], scannerUsers: [], shifts: [], settings: INITIAL_SETTINGS };
 
 const PENDING_SALES_KEY = "zehra_pending_sales";
 const PENDING_STOCK_KEY = "zehra_pending_stock";
 const PENDING_COUNT_KEY = "zehra_pending_sayim";
+const PENDING_PURCHASE_KEY = "zehra_pending_purchase";
+const PENDING_PRICE_KEY = "zehra_pending_price";
 // Everything, but only the RECENT slice of sales — a full year of receipts
 // can be many MB (this store's whole history alone was ~10MB) and a Kassa
 // PC only ever needs to browse recent checks while offline, not the entire
@@ -334,6 +346,40 @@ function MarketProvider({ children, serverUrl, token = "", initialAdminPw = "" }
     localStorage.setItem(PENDING_COUNT_KEY, JSON.stringify(list));
   };
 
+  // Same queue-and-replay approach for a "Mal qəbulu" completed while
+  // offline (phone's Qəbul tab used to just show an error and leave it to
+  // the person to remember to retry) and for a "Qiymət yoxla → Qiyməti
+  // dəyiş" price edit (used to be lost outright with no queue at all).
+  const [pendingPurchases, setPendingPurchases] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(PENDING_PURCHASE_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
+  const pendingPurchasesRef = React.useRef(pendingPurchases);
+  pendingPurchasesRef.current = pendingPurchases;
+
+  const persistPendingPurchases = (list) => {
+    setPendingPurchases(list);
+    localStorage.setItem(PENDING_PURCHASE_KEY, JSON.stringify(list));
+  };
+
+  const [pendingPriceChanges, setPendingPriceChanges] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(PENDING_PRICE_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
+  const pendingPriceChangesRef = React.useRef(pendingPriceChanges);
+  pendingPriceChangesRef.current = pendingPriceChanges;
+
+  const persistPendingPriceChanges = (list) => {
+    setPendingPriceChanges(list);
+    localStorage.setItem(PENDING_PRICE_KEY, JSON.stringify(list));
+  };
+
   // Set only after the Admin-panel password prompt is passed (see Inner/
   // submitPw). Kept in memory only, never persisted — sent alongside the
   // shared LAN token so the server can enforce admin-only routes itself,
@@ -401,11 +447,67 @@ function MarketProvider({ children, serverUrl, token = "", initialAdminPw = "" }
     }
   };
 
+  // Separate from call() because the caller needs the actual error text
+  // ("Ad və ya şifrə yanlışdır" vs a lockout message) to show on the
+  // Növbəyə başla screen — call() only ever returns a bare true/false.
+  const startShift = async (kassir, sifre) => {
+    try {
+      const res = await fetch(`${serverUrl}/api/shifts/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ kassir, sifre }),
+      });
+      const data = await res.json();
+      if (!res.ok) return { ok: false, error: data.error || "Giriş uğursuz oldu." };
+      setState(data);
+      lastRawRef.current = JSON.stringify(data);
+      saveCachedCatalog(data);
+      setConnected(true);
+      const shift = (data.shifts || []).find((s) => s.kassir === kassir && s.status === "Aktiv");
+      return { ok: true, shift };
+    } catch {
+      setConnected(false);
+      return { ok: false, error: "Serverlə əlaqə yoxdur." };
+    }
+  };
+
+  const closeShift = async (id) => {
+    try {
+      const res = await fetch(`${serverUrl}/api/shifts/${encodeURIComponent(id)}/close`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+      });
+      const data = await res.json();
+      if (!res.ok) return { ok: false, error: data.error || "Bağlanmadı." };
+      setState(data);
+      lastRawRef.current = JSON.stringify(data);
+      saveCachedCatalog(data);
+      setConnected(true);
+      const shift = (data.shifts || []).find((s) => s.id === id);
+      return { ok: true, shift };
+    } catch {
+      setConnected(false);
+      return { ok: false, error: "Serverlə əlaqə yoxdur." };
+    }
+  };
+
   const addProduct = (p) => call("POST", "/api/products", p);
   const updateProduct = (kod, patch) => call("PUT", `/api/products/${encodeURIComponent(kod)}`, patch);
   // Separate from updateProduct so the desktop's Qiymət yoxla history page
   // has a dedicated log of price edits made while scanning on a phone.
-  const updateProductPrice = (kod, satish) => call("POST", `/api/products/${encodeURIComponent(kod)}/price`, { satish });
+  // Offline, this used to just fail and lose the edit outright — now
+  // queued and applied to the local product list right away, same as the
+  // other phone actions below.
+  const updateProductPrice = async (kod, satish) => {
+    const ok = await call("POST", `/api/products/${encodeURIComponent(kod)}/price`, { satish });
+    if (ok) return true;
+    persistPendingPriceChanges([...pendingPriceChangesRef.current, { kod, satish }]);
+    setState((s) => ({
+      ...s,
+      products: s.products.map((p) => (p.kod === kod ? { ...p, satish } : p)),
+    }));
+    return false;
+  };
   // delta > 0 = mal gəldi (stock-in), delta < 0 = stokdan çıxar (write-off,
   // reason required) — recorded as a stock movement instead of silently
   // overwriting the total. Offline, this queues (same as addSale) instead
@@ -413,20 +515,29 @@ function MarketProvider({ children, serverUrl, token = "", initialAdminPw = "" }
   // is unreachable is applied to the local product list right away — so
   // the count on screen is correct immediately — and replayed to the
   // server, in order, once the connection returns.
+  // Returns whether the change actually reached the server this call — the
+  // change is applied either way (server-confirmed, or queued+applied
+  // locally), so callers should always proceed (clear their draft, etc.);
+  // the return value is only for choosing which message to show ("saved"
+  // vs "queued, will sync later"). Earlier this always returned true, which
+  // meant a caller had no way to know a "successful" call had actually only
+  // been queued offline — every phone tab was showing an unconditional
+  // success toast even when nothing had reached the server yet.
   const adjustStockBy = async (kod, delta, reason) => {
     const ok = await call("POST", "/api/stock/adjust", { kod, delta, reason });
     if (ok) return true;
     persistPendingStock([...pendingStockRef.current, { kod, delta, reason }]);
     setState((s) => ({
       ...s,
-      products: s.products.map((p) => (p.kod === kod ? { ...p, stok: Math.max(0, (p.stok || 0) + delta) } : p)),
+      products: s.products.map((p) => (p.kod === kod ? { ...p, stok: (p.stok || 0) + delta } : p)),
     }));
-    return true;
+    return false;
   };
   // Optimistically sets every counted product's stok locally right away —
   // same reasoning as adjustStockBy above — then queues for retry if the
   // batch itself couldn't reach the server (e.g. a phone in a weak-signal
-  // corner of the warehouse).
+  // corner of the warehouse). See adjustStockBy's comment above re: the
+  // return value.
   const confirmStockCount = async (items) => {
     const ok = await call("POST", "/api/stock/count", { items });
     if (ok) return true;
@@ -438,7 +549,7 @@ function MarketProvider({ children, serverUrl, token = "", initialAdminPw = "" }
         return item ? { ...p, stok: item.sayilan } : p;
       }),
     }));
-    return true;
+    return false;
   };
 
   const deleteProduct = (kod) => call("DELETE", `/api/products/${encodeURIComponent(kod)}`);
@@ -447,7 +558,10 @@ function MarketProvider({ children, serverUrl, token = "", initialAdminPw = "" }
   const updateSupplier = (ad, patch) => call("PUT", `/api/suppliers/${encodeURIComponent(ad)}`, patch);
   const deleteSupplier = (ad) => call("DELETE", `/api/suppliers/${encodeURIComponent(ad)}`);
   const addEmployee = (e) => call("POST", "/api/employees", e);
+  const updateEmployee = (ad, patch) => call("PUT", `/api/employees/${encodeURIComponent(ad)}`, patch);
   const deleteEmployee = (ad) => call("DELETE", `/api/employees/${encodeURIComponent(ad)}`);
+  const addScannerUser = (u) => call("POST", "/api/scanner-users", u);
+  const deleteScannerUser = (username) => call("DELETE", `/api/scanner-users/${encodeURIComponent(username)}`);
 
   // A sale must never be lost just because the Kassa lost its connection to
   // the Admin PC mid-shift. If the POST fails, the sale is kept in a local
@@ -510,7 +624,50 @@ function MarketProvider({ children, serverUrl, token = "", initialAdminPw = "" }
       cancelled = true;
     };
   }, [connected]);
-  const addPurchase = (payload) => call("POST", "/api/purchases", payload);
+
+  React.useEffect(() => {
+    if (!connected || pendingPurchasesRef.current.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const remaining = [...pendingPurchasesRef.current];
+      while (remaining.length > 0 && !cancelled) {
+        const ok = await call("POST", "/api/purchases", remaining[0]);
+        if (!ok) break; // still can't reach the server — stop, retry on next reconnect
+        remaining.shift();
+        persistPendingPurchases(remaining);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [connected]);
+
+  React.useEffect(() => {
+    if (!connected || pendingPriceChangesRef.current.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const remaining = [...pendingPriceChangesRef.current];
+      while (remaining.length > 0 && !cancelled) {
+        const { kod, satish } = remaining[0];
+        const ok = await call("POST", `/api/products/${encodeURIComponent(kod)}/price`, { satish });
+        if (!ok) break; // still can't reach the server — stop, retry on next reconnect
+        remaining.shift();
+        persistPendingPriceChanges(remaining);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [connected]);
+  // A "Qəbulu tamamla" made while offline used to just show an error and
+  // leave the whole draft sitting there for someone to remember to retry —
+  // now queued and replayed automatically like every other phone action.
+  const addPurchase = async (payload) => {
+    const ok = await call("POST", "/api/purchases", payload);
+    if (ok) return true;
+    persistPendingPurchases([...pendingPurchasesRef.current, payload]);
+    return false;
+  };
   const setSettings = (s) => call("PUT", "/api/settings", s);
   const restoreBackup = (data) => call("POST", "/api/restore", data);
   const importProducts = (list) => call("POST", "/api/products/import", { products: list });
@@ -529,9 +686,12 @@ function MarketProvider({ children, serverUrl, token = "", initialAdminPw = "" }
     pendingCount: pendingSales.length,
     pendingStockCount: pendingStock.length,
     pendingSayimCount: pendingCounts.length,
+    pendingPurchaseCount: pendingPurchases.length,
+    pendingPriceCount: pendingPriceChanges.length,
     connected, loading,
     addProduct, updateProduct, updateProductPrice, deleteProduct, adjustStock, adjustStockBy, returnSale, confirmStockCount,
-    addSupplier, updateSupplier, deleteSupplier, addEmployee, deleteEmployee, addSale, addPurchase, setSettings, restoreBackup,
+    addSupplier, updateSupplier, deleteSupplier, addEmployee, updateEmployee, deleteEmployee, addScannerUser, deleteScannerUser, addSale, addPurchase, setSettings, restoreBackup,
+    startShift, closeShift,
     importProducts, resetSales, setAdminPw, adminPw,
   };
 
@@ -579,6 +739,8 @@ function RoleSetup({ onDone }) {
   const [ip, setIp] = useState("");
   const [tokenInput, setTokenInput] = useState("");
   const [pwInput, setPwInput] = useState("");
+  const [usernameInput, setUsernameInput] = useState("");
+  const [scannerPwInput, setScannerPwInput] = useState("");
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState("");
   const [adminIp, setAdminIp] = useState(null);
@@ -620,24 +782,36 @@ function RoleSetup({ onDone }) {
   const connectScanner = async () => {
     // Camera access needs a secure context, which plain http://<lan-ip>
     // can never get regardless of what the phone's permission prompt says.
-    // Two ways to reach that here: a bare IP goes through our own
-    // self-signed cert on the +443 port (see getOrCreateHttpsCert in
-    // server/index.js — needs a one-time manual trust step, especially on
-    // iOS); anything else is treated as a real hostname — e.g. a Tailscale
-    // Serve address like admin.tailXXXX.ts.net — which already carries a
-    // publicly-trusted cert and "just works" with no such step.
-    const isBareIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(ip.trim());
-    const url = isBareIp ? `https://${ip.trim()}:4443` : `https://${ip.trim()}`;
+    // Our own self-signed cert on the +443 port serves both a raw IP and
+    // the fixed "zehra-market.local" mDNS hostname (see getOrCreateHttpsCert
+    // in server/index.js) — the hostname is the recommended path since it
+    // never changes even if the admin computer's actual IP does, so the
+    // one-time cert trust step never has to be repeated. A real external
+    // hostname (e.g. a Tailscale Serve address like admin.tailXXXX.ts.net)
+    // already carries a publicly-trusted cert on the standard 443 port and
+    // needs no port suffix at all.
+    const trimmed = ip.trim();
+    const isBareIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(trimmed);
+    const isLocalHostname = /\.local$/i.test(trimmed);
+    const url = isBareIp || isLocalHostname ? `https://${trimmed}:4443` : `https://${trimmed}`;
     setTesting(true);
     setTestError("");
     try {
       const res = await fetch(`${url}/api/ping`);
       if (!res.ok) throw new Error();
-      const stateRes = await fetch(`${url}/api/state`, { headers: { "x-api-token": tokenInput.trim() } });
-      if (!stateRes.ok) throw new Error("token");
-      onDone("scanner", url, tokenInput.trim(), pwInput);
+      // Admin creates this username/password pair (İşçilər səhifəsi) — the
+      // phone trades it for the actual LAN token here so nobody has to
+      // manually copy/paste that opaque code onto the device.
+      const loginRes = await fetch(`${url}/api/scanner-login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: usernameInput.trim(), password: scannerPwInput }),
+      });
+      if (!loginRes.ok) throw new Error("login");
+      const { token } = await loginRes.json();
+      onDone("scanner", url, token, pwInput);
     } catch {
-      setTestError("Qoşulmaq mümkün olmadı. Bu telefonda əvvəlcə https ünvanını açıb (lazım gələrsə sertifikat xəbərdarlığını qəbul edib), IP/host və tokenin doğru olduğundan, Admin kompüterinin açıq olduğundan əmin olun.");
+      setTestError("Qoşulmaq mümkün olmadı. Bu telefonda əvvəlcə https ünvanını açıb (lazım gələrsə sertifikat xəbərdarlığını qəbul edib), IP/host, istifadəçi adı və şifrənin doğru olduğundan, Admin kompüterinin açıq olduğundan əmin olun.");
     } finally {
       setTesting(false);
     }
@@ -754,20 +928,19 @@ function RoleSetup({ onDone }) {
             <div className="text-center mb-6">
               <div className="font-black text-lg">Admin kompüterinin ünvanı</div>
               <div className="text-sm text-gray-400 mt-1">
-                Adi IP (məs. 192.168.1.15) və ya Tailscale Serve ünvanı (məs. admin.tailXXXX.ts.net) — hər ikisi işləyir.
+                <b>zehra-market.local</b> yazın — IP dəyişsə belə bu ad işləyəcək və sertifikatı bir daha etibar etməyə ehtiyac olmayacaq. Açılmırsa, adi IP-ni (məs. 192.168.1.15) yazın.
               </div>
             </div>
             {typeof window !== "undefined" && !window.isSecureContext && (
               <div className="bg-amber-50 border-2 border-amber-200 rounded-2xl p-4 mb-4 text-sm text-amber-800">
                 <b>Vacib:</b> kamera yalnız <code className="font-mono">https</code> ünvanından işləyir.
-                Tailscale ünvanı (…ts.net) istifadə edirsinizsə heç bir əlavə addım lazım deyil. Adi IP ilə isə bu telefonun brauzerində əvvəlcə{" "}
-                <b>https://{"<Admin IP>"}:4443</b> ünvanını açıb sertifikat xəbərdarlığını qəbul etmək (və iOS-da əlavə olaraq sertifikatı Tənzimləmələrdə etibar etmək) lazımdır, sonra bu addımı təkrarlayın.
+                Bu telefonun brauzerində əvvəlcə <b>https://zehra-market.local:4443</b> (və ya <b>https://{"<Admin IP>"}:4443</b>) ünvanını açıb sertifikat xəbərdarlığını qəbul etmək (və iOS-da əlavə olaraq sertifikatı Tənzimləmələrdə etibar etmək) lazımdır — bu, yalnız bir dəfə edilir, sonra bu addımı təkrarlayın.
               </div>
             )}
             <div className="space-y-3">
               <FormField
                 label="IP və ya ünvan"
-                placeholder="192.168.1.15 və ya admin.tailXXXX.ts.net"
+                placeholder="zehra-market.local (və ya 192.168.1.15)"
                 value={ip}
                 onChange={(e) => setIp(e.target.value)}
                 autoCapitalize="none"
@@ -776,11 +949,21 @@ function RoleSetup({ onDone }) {
                 spellCheck="false"
               />
               <FormField
-                label="Token"
-                placeholder="Admin ekranında göstərilən kod"
-                value={tokenInput}
-                onChange={(e) => setTokenInput(e.target.value.toUpperCase())}
-                autoCapitalize="characters"
+                label="İstifadəçi adı"
+                placeholder="Admin tərəfindən yaradılıb (İşçilər səhifəsi)"
+                value={usernameInput}
+                onChange={(e) => setUsernameInput(e.target.value)}
+                autoCapitalize="none"
+                autoCorrect="off"
+                autoComplete="off"
+                spellCheck="false"
+              />
+              <FormField
+                label="Şifrə"
+                type="password"
+                value={scannerPwInput}
+                onChange={(e) => setScannerPwInput(e.target.value)}
+                autoCapitalize="none"
                 autoCorrect="off"
                 autoComplete="off"
                 spellCheck="false"
@@ -808,7 +991,7 @@ function RoleSetup({ onDone }) {
               </button>
               <button
                 onClick={connectScanner}
-                disabled={!ip.trim() || !tokenInput.trim() || testing}
+                disabled={!ip.trim() || !usernameInput.trim() || !scannerPwInput.trim() || testing}
                 className="flex-[2] bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl py-2.5 font-bold text-sm"
               >
                 {testing ? "Yoxlanılır..." : "Qoşul"}
@@ -918,11 +1101,161 @@ function FormField({ label, ...props }) {
   );
 }
 
+const ACTIVE_SHIFT_KEY = "zehra_active_shift";
+
+// Wraps KassaView with a per-cashier "Növbəyə başla" login gate — every
+// sale used to be attributed to a hardcoded "Kassir 01" regardless of who
+// was actually standing at the terminal. Now a real employee (created in
+// İşçilər, with their own Növbə password) has to log in before the Kassa
+// screen is usable at all, and "Növbəni bitir" closes that shift with a
+// frozen nağd/kart/qaytarma/cəmi summary — printable the same way a sale
+// receipt is — and files it under Admin's Növbələr page.
+function KassaShiftGate({ role }) {
+  const { employees, startShift, closeShift, settings } = useMarket();
+  const [activeShift, setActiveShift] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(ACTIVE_SHIFT_KEY) || "null");
+    } catch {
+      return null;
+    }
+  });
+  const [kassirName, setKassirName] = useState("");
+  const [sifreInput, setSifreInput] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [closedShift, setClosedShift] = useState(null);
+  const [ending, setEnding] = useState(false);
+
+  const aktivIscilar = (employees || []).filter((e) => e.status !== "Deaktiv");
+
+  const login = async () => {
+    if (!kassirName || !sifreInput.trim()) return;
+    setLoggingIn(true);
+    setLoginError("");
+    const res = await startShift(kassirName, sifreInput.trim());
+    setLoggingIn(false);
+    if (res.ok && res.shift) {
+      const stored = { id: res.shift.id, kassir: res.shift.kassir };
+      setActiveShift(stored);
+      localStorage.setItem(ACTIVE_SHIFT_KEY, JSON.stringify(stored));
+      setSifreInput("");
+    } else {
+      setLoginError(res.error || "Giriş uğursuz oldu.");
+    }
+  };
+
+  const endShift = async () => {
+    if (!activeShift) return;
+    if (!window.confirm("Növbəni bitirmək istədiyinizə əminsiniz?")) return;
+    setEnding(true);
+    const res = await closeShift(activeShift.id);
+    setEnding(false);
+    if (res.ok && res.shift) {
+      localStorage.removeItem(ACTIVE_SHIFT_KEY);
+      setActiveShift(null);
+      setClosedShift(res.shift);
+    } else {
+      window.alert(res.error || "Növbə bağlanmadı — serverlə əlaqəni yoxlayın.");
+    }
+  };
+
+  if (!activeShift) {
+    return (
+      <div className="min-h-screen bg-[#f4f6f5] flex items-center justify-center p-6">
+        <div className="bg-white rounded-3xl shadow-lg border border-gray-200 p-8 w-full max-w-sm">
+          <div className="flex justify-center mb-6">
+            <Logo />
+          </div>
+          <div className="text-center mb-6">
+            <div className="font-black text-lg">Növbəyə başla</div>
+            <div className="text-sm text-gray-400 mt-1">Adınızı seçib şifrənizi daxil edin.</div>
+          </div>
+          {closedShift && (
+            <div className="bg-green-50 border border-green-200 rounded-2xl p-4 mb-4 text-sm text-green-700">
+              <div className="mb-1">
+                Növbə bağlandı ({closedShift.kassir}) — cəmi <b>{fmt(closedShift.umumiCemi)} AZN</b>.
+              </div>
+              <div className="flex justify-between text-xs text-green-600 mb-3">
+                <span>Nəğd: {fmt(closedShift.nagdCemi)} AZN</span>
+                <span>Kart: {fmt(closedShift.kartCemi)} AZN</span>
+                {closedShift.qaytarmaSayi > 0 && <span>Qaytarma: -{fmt(closedShift.qaytarmaCemi)} AZN</span>}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setClosedShift(null)}
+                  className="flex-1 border border-green-300 text-green-700 rounded-lg py-1.5 text-xs font-semibold"
+                >
+                  Bağla
+                </button>
+                <button
+                  onClick={() => printReceipt(null, settings)}
+                  className="flex-1 bg-green-600 hover:bg-green-700 text-white rounded-lg py-1.5 text-xs font-semibold"
+                >
+                  Çeki çap et
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="space-y-3">
+            <div>
+              <div className="text-xs text-gray-500 mb-1">Kassir</div>
+              <select
+                value={kassirName}
+                onChange={(e) => setKassirName(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-green-400"
+              >
+                <option value="">Seçin...</option>
+                {aktivIscilar.map((e) => (
+                  <option key={e.ad} value={e.ad}>{e.ad}</option>
+                ))}
+              </select>
+            </div>
+            <FormField
+              label="Şifrə"
+              type="password"
+              value={sifreInput}
+              onChange={(e) => setSifreInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && login()}
+            />
+          </div>
+          {loginError && <div className="text-red-500 text-xs font-semibold mt-3">{loginError}</div>}
+          <button
+            onClick={login}
+            disabled={!kassirName || !sifreInput.trim() || loggingIn}
+            className="w-full mt-4 bg-[#16a34a] hover:bg-[#15803d] disabled:opacity-40 text-white rounded-xl py-3 font-bold text-sm"
+          >
+            {loggingIn ? "Yoxlanılır..." : "Növbəyə başla"}
+          </button>
+        </div>
+
+        {closedShift && (
+          <div className="print-area hidden print:block">
+            <pre style={{ fontFamily: "monospace", fontSize: "20px", fontWeight: 900, whiteSpace: "pre-wrap", lineHeight: 1.35 }}>
+              {buildShiftReceiptText(closedShift, settings)}
+            </pre>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <KassaView role={role} activeShift={activeShift} onEndShift={endShift} />
+      {ending && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 text-white font-semibold">
+          Növbə bağlanır...
+        </div>
+      )}
+    </>
+  );
+}
+
 /* ---------------------------------------------------------------- */
 /* KASSA (POS) VIEW                                                  */
 /* ---------------------------------------------------------------- */
 
-function KassaView({ role }) {
+function KassaView({ role, activeShift, onEndShift }) {
   const canDiscount = role !== "kassa";
   const { products, sales, addSale, returnSale, settings, updateProduct, adminPw, setAdminPw } = useMarket();
   const [returningNo, setReturningNo] = useState(null);
@@ -963,6 +1296,7 @@ function KassaView({ role }) {
   const [lastSale, setLastSale] = useState(null);
   const [viewSale, setViewSale] = useState(null);
   const [scanMsg, setScanMsg] = useState(null);
+  const [edvMsg, setEdvMsg] = useState(null);
   const [lastAdded, setLastAdded] = useState(null);
   // Barkodsuz siyahıdan çoxlu miqdar (məs. "50 yumurta") bir dəfəyə əlavə
   // etmək üçün — kassir hər dənə üçün ayrıca toxunmasın.
@@ -1221,7 +1555,8 @@ function KassaView({ role }) {
     const sale = {
       no: generateSaleNo(sales),
       tarix: nowStr(),
-      kassir: "Kassir 01",
+      kassir: activeShift ? activeShift.kassir : "Naməlum",
+      shiftId: activeShift ? activeShift.id : null,
       say: cart.length,
       meblegh: total,
       odenish: odenishLabel,
@@ -1239,6 +1574,68 @@ function KassaView({ role }) {
       cardPart: method === "qarisiq" ? mixedCardPart : null,
     };
     addSale(sale);
+    // eKassam fiscal terminal — real protocol (from api-doc.ekassam.az's own
+    // published OpenAPI spec, not reverse-engineered). Best-effort only:
+    // never blocks or affects the sale itself if the terminal is
+    // unreachable/misconfigured — the sale is already recorded above either way.
+    if (settings.edvEnabled && settings.edvTerminalIp && settings.edvKey && window.electronAPI && window.electronAPI.sendEdvSale) {
+      const edvItems = cart.map((it) => {
+        const itemSum = round2(it.qiymet * it.miqdar * (1 - (it.endirim || 0) / 100));
+        return {
+          itemName: it.ad,
+          itemCodeType: 1,
+          itemCode: it.kod || "",
+          itemQuantityType: it.novu === "çəki" ? 1 : 0,
+          itemQuantity: it.miqdar,
+          itemPrice: it.qiymet,
+          itemDiscountPrice: round2(it.qiymet * (it.endirim || 0) / 100),
+          itemSum,
+          itemVatPercent: 0,
+        };
+      });
+      const edvCashSum = method === "nagd" ? sale.meblegh : method === "qarisiq" ? mixedCashPart : 0;
+      const edvCashlessSum = method === "kart" ? sale.meblegh : method === "qarisiq" ? mixedCardPart : 0;
+      const edvSale = {
+        cashier: activeShift ? activeShift.kassir : "Naməlum",
+        currency: "AZN",
+        items: edvItems,
+        sum: sale.meblegh,
+        cashSum: round2(edvCashSum),
+        cashlessSum: round2(edvCashlessSum),
+        prepaymentSum: 0,
+        creditSum: 0,
+        bonusSum: 0,
+        incomingSum: method === "nagd" ? sale.received : sale.meblegh,
+        changeSum: method === "nagd" ? sale.change : 0,
+        vatAmounts: [{ vatSum: sale.meblegh, vatPercent: 0 }],
+        uuid: sale.no,
+      };
+      setEdvMsg({ text: "ƏDV terminala göndərilir...", isError: false });
+      window.electronAPI
+        .sendEdvSale(settings.edvTerminalIp, settings.edvKey, edvSale, !settings.edvMergePrint)
+        .then((res) => {
+          setEdvMsg(
+            res && res.ok
+              ? { text: "ƏDV çeki uğurla göndərildi.", isError: false }
+              : { text: `ƏDV xətası: ${(res && res.error) || "naməlum"}`, isError: true }
+          );
+          // Merged-print mode: the terminal was told not to auto-print (see
+          // autoPrint above), so its fiscal document number/ID are stapled
+          // onto Market's OWN receipt instead — patched in after the fact
+          // since this response only arrives after the receipt modal is
+          // already open. buildReceiptText picks these fields up if present.
+          if (settings.edvMergePrint && res && res.ok && res.data) {
+            const edvInfo = { edvDocNo: res.data.document_number, edvFiscalId: res.data.short_document_id };
+            setLastSale((s) => (s && s.no === sale.no ? { ...s, ...edvInfo } : s));
+            setViewSale((s) => (s && s.no === sale.no ? { ...s, ...edvInfo } : s));
+          }
+          setTimeout(() => setEdvMsg(null), 8000);
+        })
+        .catch((err) => {
+          setEdvMsg({ text: `ƏDV xətası: ${err && err.message}`, isError: true });
+          setTimeout(() => setEdvMsg(null), 8000);
+        });
+    }
     setLastSale(sale);
     setViewSale(sale);
     setPayOpen(false);
@@ -1316,16 +1713,31 @@ function KassaView({ role }) {
           >
             <Receipt size={16} />
           </button>
-          <div className="bg-white/10 rounded-full pl-3 pr-4 py-2 flex items-center gap-2 text-white">
-            <User size={16} />
-            <span className="text-sm font-semibold">Kassir 1</span>
-          </div>
+          {activeShift && (
+            <div className="bg-white/10 rounded-full pl-3 pr-4 py-2 flex items-center gap-2 text-white">
+              <User size={16} />
+              <span className="text-sm font-semibold">{activeShift.kassir}</span>
+            </div>
+          )}
+          {activeShift && onEndShift && (
+            <button
+              onClick={onEndShift}
+              className="bg-red-500/20 hover:bg-red-500/30 text-red-100 rounded-full px-4 py-2 text-sm font-semibold"
+            >
+              Növbəni bitir
+            </button>
+          )}
         </div>
       </div>
 
       {scanMsg && (
         <div className={`px-6 py-2 text-sm font-semibold ${scanMsg.isError ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}>
           {scanMsg.text}
+        </div>
+      )}
+      {edvMsg && (
+        <div className={`px-6 py-2 text-sm font-semibold ${edvMsg.isError ? "bg-red-50 text-red-600" : "bg-blue-50 text-blue-700"}`}>
+          {edvMsg.text}
         </div>
       )}
 
@@ -1862,7 +2274,7 @@ function KassaView({ role }) {
           character padding is the one thing every such driver gets right. */}
       {receiptOpen && viewSale && (
         <div className="print-area hidden print:block">
-          <pre style={{ fontFamily: "monospace", fontSize: "15px", fontWeight: 700, whiteSpace: "pre-wrap", lineHeight: 1.3 }}>
+          <pre style={{ fontFamily: "monospace", fontSize: "20px", fontWeight: 900, whiteSpace: "pre-wrap", lineHeight: 1.35 }}>
             {buildReceiptText(viewSale, settings)}
           </pre>
         </div>
@@ -1871,9 +2283,10 @@ function KassaView({ role }) {
   );
 }
 
-// 32 characters fits standard 58mm thermal paper at the typical font the
-// printer falls back to; also reads fine on wider 80mm rolls.
-const RECEIPT_WIDTH = 32;
+// Was 32 at the smaller print font — narrowed to leave room now that the
+// print CSS renders bigger/bolder (user reported lines getting cut off/
+// wrapped on the actual thermal paper at the old font+width combination).
+const RECEIPT_WIDTH = 28;
 function padLine(left, right, width = RECEIPT_WIDTH) {
   left = String(left);
   right = String(right);
@@ -1944,8 +2357,46 @@ function buildReceiptText(sale, settings) {
   }
   lines.push(divider);
 
+  // Only present when Parametrlər's "ƏDV çeki ... birləşdirilsin" is on —
+  // the terminal was told not to auto-print its own copy (see edvMergePrint
+  // in KassaView.confirmSale), so its fiscal document number is stapled
+  // onto this receipt instead of appearing on a separate slip.
+  if (sale.edvDocNo != null) {
+    lines.push(padLine("Fiskal sənəd №:", String(sale.edvDocNo)));
+    if (sale.edvFiscalId) lines.push(padLine("Fiskal ID:", sale.edvFiscalId));
+    lines.push(divider);
+  }
+
   const thanks = settings.cekTesekkurMesaji || "TƏŞƏKKÜRLƏR!\nXoş gəlmisiniz!";
   thanks.split("\n").forEach((l) => lines.push(centerLine(l)));
+  lines.push("");
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+// End-of-shift handover summary — same fixed-width plain-text approach as
+// buildReceiptText above and for the same reason (thermal printer driver).
+function buildShiftReceiptText(shift, settings) {
+  const lines = [];
+  const divider = "-".repeat(RECEIPT_WIDTH);
+
+  lines.push(centerLine(settings.magazaAdi || "ZƏHRA MARKET"));
+  lines.push(centerLine("NÖVBƏ HESABATI"));
+  lines.push(divider);
+  lines.push(`Kassir: ${shift.kassir}`);
+  lines.push(`Başlama: ${shift.baslama}`);
+  lines.push(`Bitmə: ${shift.bitme}`);
+  lines.push(divider);
+  lines.push(padLine("Satış sayı:", String(shift.satisSayi || 0)));
+  lines.push(padLine("Nəğd satış:", `${fmt(shift.nagdCemi)} AZN`));
+  lines.push(padLine("Kart satış:", `${fmt(shift.kartCemi)} AZN`));
+  if (shift.qaytarmaSayi > 0) {
+    lines.push(padLine("Qaytarma sayı:", String(shift.qaytarmaSayi)));
+    lines.push(padLine("Qaytarma məbləği:", `-${fmt(shift.qaytarmaCemi)} AZN`));
+  }
+  lines.push(divider);
+  lines.push(padLine("ÜMUMİ:", `${fmt(shift.umumiCemi)} AZN`));
   lines.push("");
   lines.push("");
 
@@ -2067,6 +2518,7 @@ const NAV = [
   { key: "satislar", label: "Satışlar", icon: LineChart },
   { key: "hesabatlar", label: "Hesabatlar", icon: FileBarChart2 },
   { key: "isciler", label: "İşçilər", icon: Users },
+  { key: "novbeler", label: "Növbələr", icon: Clock },
   { key: "techizatcilar", label: "Təchizatçılar", icon: Truck },
   { key: "terezi", label: "Tərəzi", icon: ScanBarcode },
   { key: "backup", label: "Ehtiyat nüsxə", icon: Download },
@@ -2106,6 +2558,7 @@ function StatusPill({ status }) {
     Endirim: "bg-red-50 text-red-500",
     Bitib: "bg-red-50 text-red-500",
     Aktiv: "bg-green-50 text-green-600",
+    Bağlı: "bg-gray-100 text-gray-600",
     Tamamlandı: "bg-green-50 text-green-600",
     "Ləğv edilib": "bg-red-50 text-red-500",
     "İadə edilib": "bg-red-50 text-red-500",
@@ -3750,12 +4203,31 @@ function HesabatlarPage() {
   );
 }
 
-const emptyEmployeeForm = { ad: "", rol: "Kassir" };
+const emptyEmployeeForm = { ad: "", rol: "Kassir", sifre: "" };
 
 function IscilerPage() {
-  const { employees, addEmployee, deleteEmployee } = useMarket();
+  const { employees, addEmployee, updateEmployee, deleteEmployee, scannerUsers, addScannerUser, deleteScannerUser } = useMarket();
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState(emptyEmployeeForm);
+  const [suModalOpen, setSuModalOpen] = useState(false);
+  const [suForm, setSuForm] = useState({ username: "", password: "" });
+  const [suError, setSuError] = useState("");
+
+  const saveScannerUser = async () => {
+    if (!suForm.username.trim() || !suForm.password.trim()) return;
+    const ok = await addScannerUser({ username: suForm.username.trim(), password: suForm.password.trim() });
+    if (ok) {
+      setSuModalOpen(false);
+      setSuForm({ username: "", password: "" });
+      setSuError("");
+    } else {
+      setSuError("Yadda saxlanmadı — bu ad artıq mövcud ola bilər.");
+    }
+  };
+
+  const removeScannerUser = (u) => {
+    if (window.confirm(`"${u.username}" skaner girişi silinsin?`)) deleteScannerUser(u.username);
+  };
 
   const openAdd = () => {
     setForm(emptyEmployeeForm);
@@ -3763,10 +4235,11 @@ function IscilerPage() {
   };
 
   const save = () => {
-    if (!form.ad.trim()) return;
+    if (!form.ad.trim() || !form.sifre.trim()) return;
     addEmployee({
       ad: form.ad.trim(),
       rol: form.rol,
+      sifre: form.sifre.trim(),
       icaze: form.rol === "Rəhbər" ? "Tam giriş" : "Yalnız kassa",
       status: "Aktiv",
       giris: "—",
@@ -3776,6 +4249,11 @@ function IscilerPage() {
 
   const remove = (e) => {
     if (window.confirm(`"${e.ad}" işçi siyahısından silinsin?`)) deleteEmployee(e.ad);
+  };
+
+  const resetPassword = (e) => {
+    const yeni = window.prompt(`${e.ad} üçün yeni Növbə şifrəsi:`);
+    if (yeni && yeni.trim()) updateEmployee(e.ad, { sifre: yeni.trim() });
   };
 
   return (
@@ -3804,7 +4282,7 @@ function IscilerPage() {
                 <td className="py-3 px-4">{e.giris}</td>
                 <td className="py-3 px-4">
                   <div className="flex items-center gap-3">
-                    <button className="text-blue-600 text-xs font-semibold">İCAZƏLƏR</button>
+                    <button onClick={() => resetPassword(e)} className="text-blue-600 text-xs font-semibold">ŞİFRƏ SIFIRLA</button>
                     <button onClick={() => remove(e)} className="text-red-400 hover:text-red-600">
                       <Trash2 size={14} />
                     </button>
@@ -3815,9 +4293,68 @@ function IscilerPage() {
           </tbody>
         </table>
       </div>
-      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800 flex items-center gap-2">
+      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800 flex items-center gap-2 mb-4">
         <AlertTriangle size={16} /> TƏHLÜKƏSİZLİK: Kassir stok, alış qiyməti, mənfəət və rəhbər hesabatlarını görə bilməz.
       </div>
+
+      <div className="flex items-center justify-between mb-3 mt-6">
+        <div>
+          <div className="font-bold text-sm">Telefon (Skaner) girişləri</div>
+          <div className="text-xs text-gray-400 mt-0.5">
+            Bu istifadəçi adı/şifrə ilə telefon "Telefon (Skaner)" rolunda LAN tokenini yazmadan giriş edə bilər.
+          </div>
+        </div>
+        <button
+          onClick={() => { setSuForm({ username: "", password: "" }); setSuError(""); setSuModalOpen(true); }}
+          className="bg-[#16a34a] text-white rounded-xl px-4 py-2.5 text-sm font-semibold flex items-center gap-2 shrink-0"
+        >
+          <Plus size={16} /> İSTİFADƏÇİ ƏLAVƏ ET
+        </button>
+      </div>
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-gray-50 text-left text-gray-500 text-xs">
+              <th className="py-3 px-4">İstifadəçi adı</th><th className="py-3 px-4"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {(scannerUsers || []).map((u) => (
+              <tr key={u.username} className="border-t border-gray-100">
+                <td className="py-3 px-4 font-medium">{u.username}</td>
+                <td className="py-3 px-4 text-right">
+                  <button onClick={() => removeScannerUser(u)} className="text-red-400 hover:text-red-600">
+                    <Trash2 size={14} />
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {(scannerUsers || []).length === 0 && (
+              <tr>
+                <td colSpan={2} className="py-6 text-center text-gray-400">Hələ heç bir skaner girişi yaradılmayıb.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {suModalOpen && (
+        <Modal title="Yeni skaner girişi" onClose={() => setSuModalOpen(false)} widthClass="max-w-sm">
+          <div className="space-y-3">
+            <FormField label="İstifadəçi adı" value={suForm.username} onChange={(e) => setSuForm({ ...suForm, username: e.target.value })} />
+            <FormField label="Şifrə" type="text" value={suForm.password} onChange={(e) => setSuForm({ ...suForm, password: e.target.value })} />
+            {suError && <div className="text-red-500 text-xs font-semibold">{suError}</div>}
+            <div className="flex gap-2 pt-2">
+              <button onClick={() => setSuModalOpen(false)} className="flex-1 py-2.5 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
+                Ləğv et
+              </button>
+              <button onClick={saveScannerUser} className="flex-[2] bg-[#16a34a] hover:bg-[#15803d] text-white rounded-xl py-2.5 font-bold text-sm">
+                Yadda saxla
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       {modalOpen && (
         <Modal title="Yeni işçi əlavə et" onClose={() => setModalOpen(false)}>
@@ -3834,6 +4371,12 @@ function IscilerPage() {
                 <option value="Rəhbər">Rəhbər</option>
               </select>
             </div>
+            <FormField
+              label="Növbə şifrəsi"
+              value={form.sifre}
+              onChange={(e) => setForm({ ...form, sifre: e.target.value })}
+              placeholder="Bu işçi Növbəyə başlayarkən yazacağı şifrə"
+            />
             <div className="flex gap-2 pt-2">
               <button onClick={() => setModalOpen(false)} className="flex-1 py-2.5 rounded-xl border border-gray-200 font-semibold text-gray-500 text-sm">
                 Ləğv et
@@ -3992,6 +4535,12 @@ function TechizatcilarPage() {
                       {p.endirimPct > 0 && <span className="text-green-600 ml-1">(-{p.endirimPct}%)</span>}
                     </span>
                   </div>
+                  {(p.sened || p.ekspeditor) && (
+                    <div className="px-4 py-1.5 text-[11px] text-gray-500 bg-white border-t border-gray-100 flex gap-4">
+                      {p.sened && <span>Sənəd: <b className="text-gray-700">{p.sened}</b></span>}
+                      {p.ekspeditor && <span>Ekspeditor: <b className="text-gray-700">{p.ekspeditor}</b></span>}
+                    </div>
+                  )}
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="text-left text-gray-400">
@@ -4193,6 +4742,8 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
 
   React.useEffect(() => {
     let cancelled = false;
+    let rafId = null;
+    let stream = null;
 
     // Surface exactly why, before even trying — a raw "check your
     // permissions" message with no detail was making every real cause
@@ -4208,50 +4759,64 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
       return;
     }
 
-    const hints = new Map();
-    hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
-    // TRY_HARDER makes each decode attempt noticeably heavier — worth it
-    // when decoding was failing outright, but now that it works, it was
-    // the likely cause of the camera preview stuttering/"ilişmə": each
-    // attempt runs synchronously on the main thread with no gap between
-    // them by default. Off now that plain decoding is reliable, and an
-    // explicit small gap between attempts gives the UI thread room to
-    // breathe between them instead of decoding back-to-back at max rate.
-    // 150ms was too cautious — noticeably delayed how fast a code in view
-    // actually got picked up. Without TRY_HARDER each attempt is light
-    // enough that a much shorter gap still leaves the UI thread fine.
-    const reader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 50, delayBetweenScanSuccess: rescanDelayMs });
+    const handleDecodeResult = (text) => {
+      const now = Date.now();
+      if (text === lastRef.current.code && now - lastRef.current.time < rescanDelayMs) return;
+      lastRef.current = { code: text, time: now };
+      playBeep();
+      if (navigator.vibrate) navigator.vibrate(70);
+      onDecode(text);
+    };
 
-    reader
-      .decodeFromConstraints(
-        {
-          video: {
-            facingMode: "environment",
-            // Bumped back up from 720p — a small barcode's bars need more
-            // raw detail to resolve at all, and ZXing decodes fast enough
-            // now that the extra resolution doesn't reintroduce the earlier
-            // stutter the way it did on html5-qrcode's JS fallback.
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            // Continuous autofocus, where the browser exposes it (mainly
-            // Android Chrome — iOS Safari doesn't expose focus control to
-            // web pages at all, a platform limitation no web app can work
-            // around). Without this some devices default to a fixed focus
-            // distance that's fine for a person's face but too far for a
-            // small barcode held close.
-            advanced: [{ focusMode: "continuous" }],
-          },
-        },
-        videoRef.current,
-        (result, err) => {
+    const setupTrackExtras = (track) => {
+      try {
+        const caps = track && track.getCapabilities && track.getCapabilities();
+        setTorchSupported(!!(caps && caps.torch));
+        if (caps && caps.zoom) {
+          setZoomRange({ min: caps.zoom.min, max: caps.zoom.max, step: caps.zoom.step || 0.1 });
+          // Start a little zoomed in by default — most retail barcodes
+          // benefit from it, and it's still adjustable from here.
+          const startZoom = Math.min(caps.zoom.max, caps.zoom.min + (caps.zoom.max - caps.zoom.min) * 0.25);
+          track.applyConstraints({ advanced: [{ zoom: startZoom }] }).then(() => setZoom(startZoom)).catch(() => {});
+        }
+      } catch {
+        setTorchSupported(false);
+      }
+    };
+
+    // The platform's own native barcode reader (Android Chrome/WebView
+    // ships one backed by Google's ML Kit, hardware/OS-accelerated) locks
+    // on and decodes a soft or off-angle barcode far faster and more
+    // reliably than any JS decoder running on the main thread — use it
+    // whenever the browser actually exposes it, polling the live video
+    // frame directly via requestAnimationFrame.
+    const startNativeDetector = (detector) => {
+      const loop = async () => {
+        if (cancelled) return;
+        const video = videoRef.current;
+        if (video && video.readyState >= 2) {
+          try {
+            const codes = await detector.detect(video);
+            if (codes && codes.length > 0) handleDecodeResult(codes[0].rawValue);
+          } catch {
+            // transient native-decoder error — ignore and keep polling.
+          }
+        }
+        rafId = requestAnimationFrame(loop);
+      };
+      rafId = requestAnimationFrame(loop);
+    };
+
+    // Fallback JS decoder for platforms with no native BarcodeDetector
+    // (iOS Safari, older WebViews, most desktop browsers).
+    const startZxingFallback = (mediaStream) => {
+      const hints = new Map();
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
+      const reader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 50, delayBetweenScanSuccess: rescanDelayMs });
+      reader
+        .decodeFromStream(mediaStream, videoRef.current, (result, err) => {
           if (result) {
-            const now = Date.now();
-            const text = result.getText();
-            if (text === lastRef.current.code && now - lastRef.current.time < rescanDelayMs) return;
-            lastRef.current = { code: text, time: now };
-            playBeep();
-            if (navigator.vibrate) navigator.vibrate(70);
-            onDecode(text);
+            handleDecodeResult(result.getText());
             return;
           }
           // NotFoundException fires on essentially every frame without a
@@ -4260,28 +4825,70 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
             // A genuinely unexpected decode-loop error — rare, but surface
             // it instead of silently continuing so it isn't invisible.
           }
-        }
-      )
-      .then((controls) => {
+        })
+        .then((controls) => {
+          if (cancelled) {
+            controls.stop();
+            return;
+          }
+          controlsRef.current = controls;
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          const detail = (err && (err.message || err.name || String(err))) || "naməlum xəta";
+          setError(`Kameraya çıxış alınmadı: ${detail}`);
+        });
+    };
+
+    navigator.mediaDevices
+      .getUserMedia({
+        video: {
+          facingMode: "environment",
+          // Bumped back up from 720p — a small barcode's bars need more
+          // raw detail to resolve at all, and both decoders are fast
+          // enough now that the extra resolution doesn't reintroduce the
+          // earlier stutter the way it did on html5-qrcode's JS fallback.
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          // Continuous autofocus, where the browser exposes it (mainly
+          // Android Chrome — iOS Safari doesn't expose focus control to
+          // web pages at all, a platform limitation no web app can work
+          // around). Without this some devices default to a fixed focus
+          // distance that's fine for a person's face but too far for a
+          // small barcode held close.
+          advanced: [{ focusMode: "continuous" }],
+        },
+      })
+      .then(async (mediaStream) => {
         if (cancelled) {
-          controls.stop();
+          mediaStream.getTracks().forEach((t) => t.stop());
           return;
         }
-        controlsRef.current = controls;
+        stream = mediaStream;
+        const video = videoRef.current;
+        video.srcObject = mediaStream;
         try {
-          const track = videoRef.current && videoRef.current.srcObject && videoRef.current.srcObject.getVideoTracks()[0];
-          const caps = track && track.getCapabilities && track.getCapabilities();
-          setTorchSupported(!!(caps && caps.torch));
-          if (caps && caps.zoom) {
-            setZoomRange({ min: caps.zoom.min, max: caps.zoom.max, step: caps.zoom.step || 0.1 });
-            // Start a little zoomed in by default — most retail barcodes
-            // benefit from it, and it's still adjustable from here.
-            const startZoom = Math.min(caps.zoom.max, caps.zoom.min + (caps.zoom.max - caps.zoom.min) * 0.25);
-            track.applyConstraints({ advanced: [{ zoom: startZoom }] }).then(() => setZoom(startZoom)).catch(() => {});
-          }
+          await video.play();
         } catch {
-          setTorchSupported(false);
+          // Autoplay can reject before the element is fully mounted — the
+          // stream is still attached and will start once the browser allows it.
         }
+        setupTrackExtras(mediaStream.getVideoTracks()[0]);
+
+        let nativeOk = false;
+        if (typeof window !== "undefined" && "BarcodeDetector" in window) {
+          try {
+            const supported = await window.BarcodeDetector.getSupportedFormats();
+            const wanted = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128"].filter((f) => supported.includes(f));
+            if (wanted.length > 0) {
+              startNativeDetector(new window.BarcodeDetector({ formats: wanted }));
+              nativeOk = true;
+            }
+          } catch {
+            nativeOk = false;
+          }
+        }
+        if (!nativeOk) startZxingFallback(mediaStream);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -4291,10 +4898,12 @@ function BarcodeScannerView({ onDecode, rescanDelayMs = 1500 }) {
 
     return () => {
       cancelled = true;
+      if (rafId) cancelAnimationFrame(rafId);
       if (controlsRef.current) {
         controlsRef.current.stop();
         controlsRef.current = null;
       }
+      if (stream) stream.getTracks().forEach((t) => t.stop());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -4544,6 +5153,39 @@ function StokSayimiPage() {
 // The actual scanning UI — split out from StokSayimiPage so the standalone
 // mobile "Telefon (Skaner)" role (see TelefonSkanerApp) can reuse it with
 // its own header/chrome instead of the desktop admin PageHeader.
+// A plain <input value={number}> can't be cleared to type a fresh number —
+// the moment it's emptied, `value` snaps back to 0 and the next keystroke
+// lands next to that stuck "0" instead of replacing it. Keeping the typed
+// text as local state (allowed to be empty mid-edit) and only committing a
+// parsed number back to the row on blur/Enter fixes that.
+function SayimQtyInput({ value, onCommit }) {
+  const [text, setText] = useState(String(value));
+  React.useEffect(() => {
+    setText(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const num = round2(Math.max(0, Number(text) || 0));
+    setText(String(num));
+    if (num !== value) onCommit(num);
+  };
+
+  return (
+    <input
+      type="number"
+      inputMode="decimal"
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onFocus={(e) => e.target.select()}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.target.blur();
+      }}
+      className="w-16 text-right font-bold text-green-700 border border-gray-200 rounded-lg px-1.5 py-1 text-sm"
+    />
+  );
+}
+
 function StokSayimiBody() {
   const { products, settings, confirmStockCount, pendingSayimCount, loading } = useMarket();
   const [rows, setRows] = useState(() => {
@@ -4582,6 +5224,14 @@ function StokSayimiBody() {
     });
   };
 
+  const setRowSayilan = (kod, num) => {
+    setRows((prev) => {
+      const next = prev.map((r) => (r.kod === kod ? { ...r, sayilan: num } : r));
+      localStorage.setItem(SAYIM_DRAFT_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
   const totalTypes = rows.length;
   const totalCount = rows.reduce((s, r) => s + r.sayilan, 0);
 
@@ -4590,14 +5240,14 @@ function StokSayimiBody() {
     setConfirming(true);
     const ok = await confirmStockCount(rows.map((r) => ({ kod: r.kod, sayilan: r.sayilan })));
     setConfirming(false);
-    if (ok) {
-      setRows([]);
-      localStorage.removeItem(SAYIM_DRAFT_KEY);
-      setLastScanned(null);
-      setMsg({ text: "Sayım təsdiqləndi və stoka yazıldı.", isError: false });
-    } else {
-      setMsg({ text: "Yadda saxlanmadı — serverlə əlaqəni yoxlayın.", isError: true });
-    }
+    setRows([]);
+    localStorage.removeItem(SAYIM_DRAFT_KEY);
+    setLastScanned(null);
+    setMsg(
+      ok
+        ? { text: "Sayım təsdiqləndi və stoka yazıldı.", isError: false }
+        : { text: "Əlaqə yoxdur — sayım lokal saxlanıldı, bağlantı qayıdanda avtomatik göndəriləcək.", isError: false }
+    );
     setTimeout(() => setMsg(null), 4000);
   };
 
@@ -4675,7 +5325,7 @@ function StokSayimiBody() {
                   <div className="text-[10px] text-gray-400">Mövcud: {r.movcudStok}</div>
                 </div>
                 <div className="flex items-center gap-3 shrink-0">
-                  <span className="font-bold text-green-700">{r.sayilan}</span>
+                  <SayimQtyInput value={r.sayilan} onCommit={(num) => setRowSayilan(r.kod, num)} />
                   <button onClick={() => removeRow(r.kod)} className="text-gray-300 hover:text-red-500">
                     <XCircle size={16} />
                   </button>
@@ -4790,7 +5440,7 @@ function QiymetYoxlaPage() {
 
 // Split out for the same reason as StokSayimiBody above.
 function QiymetYoxlaBody() {
-  const { products, settings, loading, updateProductPrice } = useMarket();
+  const { products, settings, loading, updateProductPrice, pendingPriceCount } = useMarket();
   const [found, setFound] = useState(null);
   const [unknownKod, setUnknownKod] = useState(null);
   const [editing, setEditing] = useState(false);
@@ -4821,13 +5471,13 @@ function QiymetYoxlaBody() {
     setSaving(true);
     const ok = await updateProductPrice(found.kod, n);
     setSaving(false);
-    if (ok) {
-      setFound((f) => (f ? { ...f, satish: n } : f));
-      setEditing(false);
-      setMsg({ text: "Qiymət yeniləndi.", isError: false });
-    } else {
-      setMsg({ text: "Yadda saxlanmadı — serverlə əlaqəni yoxlayın.", isError: true });
-    }
+    setFound((f) => (f ? { ...f, satish: n } : f));
+    setEditing(false);
+    setMsg(
+      ok
+        ? { text: "Qiymət yeniləndi.", isError: false }
+        : { text: "Əlaqə yoxdur — dəyişiklik lokal saxlanıldı, bağlantı qayıdanda göndəriləcək.", isError: false }
+    );
     setTimeout(() => setMsg(null), 3000);
   };
 
@@ -4835,6 +5485,11 @@ function QiymetYoxlaBody() {
 
   return (
     <>
+      {pendingPriceCount > 0 && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs font-semibold rounded-xl px-3 py-2 mb-3">
+          {pendingPriceCount} qiymət dəyişikliyi hələ serverə göndərilməyib — əlaqə bərpa olunanda avtomatik göndəriləcək.
+        </div>
+      )}
       {loading || products.length === 0 ? (
         <div className="rounded-2xl bg-black/5 text-center py-16 text-sm text-gray-500 font-semibold">
           Kataloq yüklənir...
@@ -4926,7 +5581,7 @@ function QiymetYoxlaBody() {
 const QEBUL_DRAFT_KEY = "zehra_qebul_draft";
 
 function MalQebuluBody() {
-  const { products, settings, suppliers, addPurchase, loading } = useMarket();
+  const { products, settings, suppliers, addPurchase, loading, pendingPurchaseCount } = useMarket();
   const [draft, setDraft] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem(QEBUL_DRAFT_KEY) || "null");
@@ -4936,9 +5591,16 @@ function MalQebuluBody() {
   });
   const [tedarukcuInput, setTedarukcuInput] = useState("");
   const [senedInput, setSenedInput] = useState("");
+  const [ekspeditorInput, setEkspeditorInput] = useState("");
+  const [tedarukcuPickerOpen, setTedarukcuPickerOpen] = useState(false);
+  const [tedarukcuQuery, setTedarukcuQuery] = useState("");
   const [unknownKod, setUnknownKod] = useState(null);
   const [completing, setCompleting] = useState(false);
   const [msg, setMsg] = useState(null);
+
+  const tedarukcuMatches = (suppliers || []).filter((s) =>
+    s.ad.toLowerCase().includes(tedarukcuQuery.trim().toLowerCase())
+  );
 
   const persistDraft = (next) => {
     setDraft(next);
@@ -4948,7 +5610,7 @@ function MalQebuluBody() {
 
   const startDraft = () => {
     if (!tedarukcuInput.trim()) return;
-    persistDraft({ tedarukcu: tedarukcuInput.trim(), sened: senedInput.trim(), rows: [] });
+    persistDraft({ tedarukcu: tedarukcuInput.trim(), sened: senedInput.trim(), ekspeditor: ekspeditorInput.trim(), rows: [] });
   };
 
   const cancelDraft = () => {
@@ -4956,6 +5618,7 @@ function MalQebuluBody() {
     persistDraft(null);
     setTedarukcuInput("");
     setSenedInput("");
+    setEkspeditorInput("");
   };
 
   // First scan of a product adds it with sayılan=1 and an empty "sənəddə"
@@ -4976,7 +5639,19 @@ function MalQebuluBody() {
       const nextRows =
         i >= 0
           ? rows.map((r, idx) => (idx === i ? { ...r, sayilan: round2(r.sayilan + amount) } : r))
-          : [{ kod: product.kod, ad: product.ad, senedde: "", sayilan: amount }, ...rows];
+          : [
+              {
+                kod: product.kod,
+                ad: product.ad,
+                senedde: "",
+                sayilan: amount,
+                // Pre-filled from the product's current prices, same as
+                // desktop's Mal qəbulu — editable from here either way.
+                alish: product.alish || 0,
+                satish: product.satish || 0,
+              },
+              ...rows,
+            ];
       const next = { ...prev, rows: nextRows };
       localStorage.setItem(QEBUL_DRAFT_KEY, JSON.stringify(next));
       return next;
@@ -4986,6 +5661,17 @@ function MalQebuluBody() {
   const updateSenedde = (kod, value) => {
     setDraft((prev) => {
       const next = { ...prev, rows: prev.rows.map((r) => (r.kod === kod ? { ...r, senedde: value } : r)) };
+      localStorage.setItem(QEBUL_DRAFT_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  // Admin's own Mal qəbulu lets every field (miqdar, alış, satış) be typed
+  // by hand, not just bumped by scanning — this is the mobile side's
+  // equivalent for "sayılan" and the two price fields, same parity.
+  const updateRowField = (kod, field, value) => {
+    setDraft((prev) => {
+      const next = { ...prev, rows: prev.rows.map((r) => (r.kod === kod ? { ...r, [field]: value } : r)) };
       localStorage.setItem(QEBUL_DRAFT_KEY, JSON.stringify(next));
       return next;
     });
@@ -5014,36 +5700,48 @@ function MalQebuluBody() {
     const ok = await addPurchase({
       tedarukcu: draft.tedarukcu,
       sened: draft.sened,
-      items: draft.rows.map((r) => ({ kod: r.kod, miqdar: r.sayilan })),
+      ekspeditor: draft.ekspeditor,
+      items: draft.rows.map((r) => ({ kod: r.kod, miqdar: r.sayilan, alish: Number(r.alish) || 0, satish: Number(r.satish) || 0 })),
       endirimPct: 0,
     });
     setCompleting(false);
-    if (ok) {
-      persistDraft(null);
-      setTedarukcuInput("");
-      setSenedInput("");
-      setMsg({ text: "Qəbul tamamlandı və stoka yazıldı.", isError: false });
-    } else {
-      setMsg({ text: "Yadda saxlanmadı — serverlə əlaqəni yoxlayın.", isError: true });
-    }
+    persistDraft(null);
+    setTedarukcuInput("");
+    setSenedInput("");
+    setEkspeditorInput("");
+    setMsg(
+      ok
+        ? { text: "Qəbul tamamlandı və stoka yazıldı.", isError: false }
+        : { text: "Əlaqə yoxdur — qəbul lokal saxlanıldı, bağlantı qayıdanda avtomatik göndəriləcək.", isError: false }
+    );
     setTimeout(() => setMsg(null), 4000);
   };
 
   if (!draft) {
     return (
       <div className="space-y-3">
+        {pendingPurchaseCount > 0 && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs font-semibold rounded-xl px-3 py-2">
+            {pendingPurchaseCount} qəbul hələ serverə göndərilməyib — əlaqə bərpa olunanda avtomatik göndəriləcək.
+          </div>
+        )}
         {msg && (
           <div className={`text-sm font-semibold rounded-xl px-3 py-2 ${msg.isError ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}>
             {msg.text}
           </div>
         )}
         <div>
-          <FormField label="Təchizatçı" value={tedarukcuInput} onChange={(e) => setTedarukcuInput(e.target.value)} list="qebul-mobil-tedarukcu" placeholder="Təchizatçı adı" />
-          <datalist id="qebul-mobil-tedarukcu">
-            {(suppliers || []).map((s) => <option key={s.ad} value={s.ad} />)}
-          </datalist>
+          <div className="text-xs text-gray-500 mb-1">Təchizatçı</div>
+          <button
+            type="button"
+            onClick={() => { setTedarukcuQuery(""); setTedarukcuPickerOpen(true); }}
+            className={`w-full text-left border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-green-400 ${tedarukcuInput ? "text-gray-900" : "text-gray-400"}`}
+          >
+            {tedarukcuInput || "Siyahıdan seçin..."}
+          </button>
         </div>
         <FormField label="Faktura/sənəd №" value={senedInput} onChange={(e) => setSenedInput(e.target.value)} placeholder="İstəyə bağlı" />
+        <FormField label="Ekspeditor" value={ekspeditorInput} onChange={(e) => setEkspeditorInput(e.target.value)} placeholder="İstəyə bağlı" />
         <button
           onClick={startDraft}
           disabled={!tedarukcuInput.trim()}
@@ -5051,6 +5749,35 @@ function MalQebuluBody() {
         >
           Yeni qəbul yarat
         </button>
+
+        {tedarukcuPickerOpen && (
+          <Modal title="Təchizatçı seç" onClose={() => setTedarukcuPickerOpen(false)} widthClass="max-w-md">
+            <div className="p-4 space-y-3">
+              <input
+                type="text"
+                autoFocus
+                value={tedarukcuQuery}
+                onChange={(e) => setTedarukcuQuery(e.target.value)}
+                placeholder="Təchizatçı axtar..."
+                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-green-400"
+              />
+              <div className="max-h-80 overflow-auto space-y-1.5 -mx-1 px-1">
+                {tedarukcuMatches.length === 0 && (
+                  <div className="text-center text-gray-400 text-xs py-8">Nəticə tapılmadı.</div>
+                )}
+                {tedarukcuMatches.map((s) => (
+                  <button
+                    key={s.ad}
+                    onClick={() => { setTedarukcuInput(s.ad); setTedarukcuPickerOpen(false); }}
+                    className="w-full text-left border border-gray-200 rounded-xl px-3 py-2.5 text-sm font-medium hover:border-green-300 hover:bg-green-50"
+                  >
+                    {s.ad}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </Modal>
+        )}
       </div>
     );
   }
@@ -5061,6 +5788,7 @@ function MalQebuluBody() {
         <div>
           <div className="font-bold text-sm">{draft.tedarukcu}</div>
           {draft.sened && <div className="text-xs text-gray-400">Sənəd: {draft.sened}</div>}
+          {draft.ekspeditor && <div className="text-xs text-gray-400">Ekspeditor: {draft.ekspeditor}</div>}
         </div>
         <button onClick={cancelDraft} className="text-xs font-semibold text-red-500">
           Ləğv et
@@ -5090,6 +5818,8 @@ function MalQebuluBody() {
                 <th className="py-2 px-2 w-16">Sənəddə</th>
                 <th className="py-2 px-2 w-14">Sayılan</th>
                 <th className="py-2 px-2 w-10">Vəz.</th>
+                <th className="py-2 px-2 w-16">Alış</th>
+                <th className="py-2 px-2 w-16">Satış</th>
                 <th className="py-2 px-1 w-6"></th>
               </tr>
             </thead>
@@ -5108,9 +5838,27 @@ function MalQebuluBody() {
                         className="w-14 border border-gray-200 rounded-lg px-1.5 py-1 text-xs"
                       />
                     </td>
-                    <td className="py-2 px-2 font-bold">{r.sayilan}</td>
+                    <td className="py-2 px-2">
+                      <SayimQtyInput value={r.sayilan} onCommit={(num) => updateRowField(r.kod, "sayilan", num)} />
+                    </td>
                     <td className={`py-2 px-2 font-semibold ${status.tone}`}>
                       {status.icon} {status.label}
+                    </td>
+                    <td className="py-2 px-2">
+                      <input
+                        type="number"
+                        value={r.alish}
+                        onChange={(e) => updateRowField(r.kod, "alish", e.target.value)}
+                        className="w-14 border border-gray-200 rounded-lg px-1.5 py-1 text-xs"
+                      />
+                    </td>
+                    <td className="py-2 px-2">
+                      <input
+                        type="number"
+                        value={r.satish}
+                        onChange={(e) => updateRowField(r.kod, "satish", e.target.value)}
+                        className="w-14 border border-gray-200 rounded-lg px-1.5 py-1 text-xs"
+                      />
                     </td>
                     <td className="py-2 px-1">
                       <button onClick={() => removeRow(r.kod)} className="text-gray-300 hover:text-red-500">
@@ -5150,7 +5898,7 @@ const DUZELIS_SEBEBLERI = ["Tapıldı", "İtib", "Xarab olub", "Sayım fərqi", 
 // like Mal qəbulu/Sayım — there's nothing to reconcile against, it's just
 // "I found 5 more of these" or "2 of these went bad", one item at a time.
 function DuzelisBody() {
-  const { products, settings, adjustStockBy, loading } = useMarket();
+  const { products, settings, adjustStockBy, loading, pendingStockCount } = useMarket();
   const [found, setFound] = useState(null);
   const [unknownKod, setUnknownKod] = useState(null);
   const [miqdar, setMiqdar] = useState("1");
@@ -5192,17 +5940,22 @@ function DuzelisBody() {
     const delta = sign * n;
     const ok = await adjustStockBy(found.kod, delta, sign < 0 ? sebeb : "Tapıldı (telefon düzəlişi)");
     setApplying(false);
-    if (ok) {
-      setFound((f) => (f ? { ...f, stok: Math.max(0, f.stok + delta) } : f));
-      setMsg({ text: `${found.ad}: stok ${sign > 0 ? "+" : "-"}${n}`, isError: false });
-    } else {
-      setMsg({ text: "Yadda saxlanmadı — serverlə əlaqəni yoxlayın.", isError: true });
-    }
+    setFound((f) => (f ? { ...f, stok: Math.max(0, f.stok + delta) } : f));
+    setMsg(
+      ok
+        ? { text: `${found.ad}: stok ${sign > 0 ? "+" : "-"}${n}`, isError: false }
+        : { text: `Əlaqə yoxdur — dəyişiklik lokal saxlanıldı, bağlantı qayıdanda göndəriləcək.`, isError: false }
+    );
     setTimeout(() => setMsg(null), 3000);
   };
 
   return (
     <>
+      {pendingStockCount > 0 && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs font-semibold rounded-xl px-3 py-2 mb-3">
+          {pendingStockCount} dəyişiklik hələ serverə göndərilməyib — əlaqə bərpa olunanda avtomatik göndəriləcək.
+        </div>
+      )}
       {loading || products.length === 0 ? (
         <div className="rounded-2xl bg-black/5 text-center py-16 text-sm text-gray-500 font-semibold">
           Kataloq yüklənir...
@@ -5420,6 +6173,8 @@ function ParametrlerPage({ onResetRole }) {
   const [draft, setDraft] = useState(settings);
   const [saved, setSaved] = useState(false);
   const [printers, setPrinters] = useState([]);
+  const [edvTestMsg, setEdvTestMsg] = useState(null);
+  const [edvTesting, setEdvTesting] = useState(false);
   const role = localStorage.getItem("zehra_role") || "admin";
   const serverUrl = localStorage.getItem("zehra_server_url") || "http://127.0.0.1:4000";
   const isElectron = typeof window !== "undefined" && !!window.electronAPI;
@@ -5444,6 +6199,15 @@ function ParametrlerPage({ onResetRole }) {
     setSettings(draft);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  const testEdv = async () => {
+    if (!isElectron || !window.electronAPI.testEdvConnection) return;
+    setEdvTesting(true);
+    setEdvTestMsg(null);
+    const res = await window.electronAPI.testEdvConnection(draft.edvTerminalIp, draft.edvKey);
+    setEdvTesting(false);
+    setEdvTestMsg(res.ok ? { text: "Uğurlu — terminal cavab verdi.", isError: false } : { text: res.error || "Naməlum xəta.", isError: true });
   };
 
   return (
@@ -5501,6 +6265,64 @@ function ParametrlerPage({ onResetRole }) {
               />
             )}
           </div>
+        </div>
+      </div>
+      <div className="bg-white rounded-2xl border border-gray-200 p-5 mb-4">
+        <div className="text-sm font-bold text-gray-600 mb-1">ƏDV (FİSKAL) TERMİNAL</div>
+        <div className="text-xs text-gray-400 mb-4">
+          Hər satışda terminala eKassam-ın rəsmi API-si (şəbəkə üzərindən) ilə göndərilir. Açar (key) terminalın öz Ayarlar ekranında yazılanla EYNİ olmalıdır.
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <label className="flex items-center gap-2 text-sm text-gray-600">
+            <input
+              type="checkbox"
+              checked={!!draft.edvEnabled}
+              onChange={(e) => setDraft({ ...draft, edvEnabled: e.target.checked })}
+              className="w-4 h-4 accent-[#16a34a]"
+            />
+            Aktiv et
+          </label>
+          <div />
+          <FormField
+            label="Terminalın IP ünvanı"
+            value={draft.edvTerminalIp}
+            onChange={(e) => setDraft({ ...draft, edvTerminalIp: e.target.value })}
+            placeholder="məs. 192.168.1.79"
+          />
+          <FormField
+            label="Açar (key)"
+            value={draft.edvKey}
+            onChange={(e) => setDraft({ ...draft, edvKey: e.target.value })}
+            placeholder="Terminalda yazılan açarla eyni"
+          />
+        </div>
+        <label className="flex items-start gap-2 text-sm text-gray-600 mt-4">
+          <input
+            type="checkbox"
+            checked={!!draft.edvMergePrint}
+            onChange={(e) => setDraft({ ...draft, edvMergePrint: e.target.checked })}
+            className="w-4 h-4 accent-[#16a34a] mt-0.5"
+          />
+          <span>
+            Terminaldan ayrıca çek çıxmasın — fiskal sənəd nömrəsi termo printerdəki çekin üzərinə əlavə olunsun.
+            <span className="block text-xs text-gray-400 mt-0.5">
+              Terminalın öz çekindəki rəsmi QR-kod/format bu halda çap olunmur — yalnız sənəd nömrəsi görünür.
+            </span>
+          </span>
+        </label>
+        <div className="flex items-center gap-3 mt-3">
+          <button
+            onClick={testEdv}
+            disabled={edvTesting || !draft.edvTerminalIp || !draft.edvKey}
+            className="border border-gray-200 hover:border-green-300 disabled:opacity-40 text-sm font-semibold rounded-xl px-4 py-2"
+          >
+            {edvTesting ? "Yoxlanılır..." : "Bağlantını yoxla"}
+          </button>
+          {edvTestMsg && (
+            <span className={`text-sm font-semibold ${edvTestMsg.isError ? "text-red-600" : "text-green-700"}`}>
+              {edvTestMsg.text}
+            </span>
+          )}
         </div>
       </div>
       <div className="bg-white rounded-2xl border border-gray-200 p-5 mb-4">
@@ -5566,6 +6388,92 @@ function ParametrlerPage({ onResetRole }) {
   );
 }
 
+const NOVBE_SEHIFE = 30;
+
+// Admin's read-only view of every "Növbəyə başla"/"Növbəni bitir" cycle —
+// who worked, when, and the frozen nağd/kart/qaytarma/cəmi totals computed
+// at close time (see POST /api/shifts/:id/close). Kassa devices don't need
+// their own version of this — it's for reconciling cash drawers at the end
+// of the day, an Admin-only concern.
+function NovbelerPage() {
+  const { shifts } = useMarket();
+  const [page, setPage] = useState(0);
+
+  const list = shifts || [];
+  const pageCount = Math.max(1, Math.ceil(list.length / NOVBE_SEHIFE));
+  const clampedPage = Math.min(page, pageCount - 1);
+  const paged = list.slice(clampedPage * NOVBE_SEHIFE, (clampedPage + 1) * NOVBE_SEHIFE);
+
+  return (
+    <div>
+      <PageHeader title="Növbələr" />
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-gray-50 text-left text-gray-500 text-xs">
+              <th className="py-3 px-4">Kassir</th>
+              <th className="py-3 px-4">Başlama</th>
+              <th className="py-3 px-4">Bitmə</th>
+              <th className="py-3 px-4">Status</th>
+              <th className="py-3 px-4">Satış</th>
+              <th className="py-3 px-4">Nəğd</th>
+              <th className="py-3 px-4">Kart</th>
+              <th className="py-3 px-4">Qaytarma</th>
+              <th className="py-3 px-4">Cəmi</th>
+            </tr>
+          </thead>
+          <tbody>
+            {paged.map((s) => (
+              <tr key={s.id} className="border-t border-gray-100">
+                <td className="py-3 px-4 font-medium">{s.kassir}</td>
+                <td className="py-3 px-4 text-gray-500">{s.baslama}</td>
+                <td className="py-3 px-4 text-gray-500">{s.bitme || "—"}</td>
+                <td className="py-3 px-4"><StatusPill status={s.status} /></td>
+                <td className="py-3 px-4">{s.satisSayi ?? "—"}</td>
+                <td className="py-3 px-4">{s.nagdCemi != null ? `${fmt(s.nagdCemi)} AZN` : "—"}</td>
+                <td className="py-3 px-4">{s.kartCemi != null ? `${fmt(s.kartCemi)} AZN` : "—"}</td>
+                <td className="py-3 px-4 text-red-500">
+                  {s.qaytarmaCemi > 0 ? `-${fmt(s.qaytarmaCemi)} AZN` : "—"}
+                </td>
+                <td className="py-3 px-4 font-bold">{s.umumiCemi != null ? `${fmt(s.umumiCemi)} AZN` : "—"}</td>
+              </tr>
+            ))}
+            {list.length === 0 && (
+              <tr>
+                <td colSpan={9} className="py-8 text-center text-gray-400">Hələ heç bir növbə qeydə alınmayıb.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        {list.length > 0 && (
+          <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 text-xs text-gray-500">
+            <div>
+              {clampedPage * NOVBE_SEHIFE + 1}–{Math.min((clampedPage + 1) * NOVBE_SEHIFE, list.length)} / {list.length}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPage((pg) => Math.max(0, pg - 1))}
+                disabled={clampedPage === 0}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                « Əvvəlki
+              </button>
+              <span className="font-semibold">{clampedPage + 1} / {pageCount}</span>
+              <button
+                onClick={() => setPage((pg) => Math.min(pageCount - 1, pg + 1))}
+                disabled={clampedPage >= pageCount - 1}
+                className="border border-gray-200 rounded-lg px-3 py-1.5 font-semibold disabled:opacity-30"
+              >
+                Sonrakı »
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const PAGES = {
   icmal: IcmalPage,
   mehsullar: MehsullarPage,
@@ -5575,6 +6483,7 @@ const PAGES = {
   satislar: SatislarPage,
   hesabatlar: HesabatlarPage,
   isciler: IscilerPage,
+  novbeler: NovbelerPage,
   techizatcilar: TechizatcilarPage,
   terezi: TereziPage,
   backup: BackupPage,
@@ -5857,7 +6766,7 @@ function Inner({ role, app, setApp, onResetRole }) {
           </div>
         </Modal>
       )}
-      {role === "admin" ? (app === "kassa" ? <KassaView role={role} /> : <AdminView onResetRole={onResetRole} />) : <KassaView role={role} />}
+      {role === "admin" ? (app === "kassa" ? <KassaShiftGate role={role} /> : <AdminView onResetRole={onResetRole} />) : <KassaShiftGate role={role} />}
     </div>
   );
 }
