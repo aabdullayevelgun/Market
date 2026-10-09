@@ -54,10 +54,20 @@ fs.mkdirSync(outDir, { recursive: true });
     await shot("kassa");
   });
   await step("kassa-satis", async () => {
-    const search = page.locator("input").first();
-    await search.fill("Kola");
-    await page.waitForTimeout(500);
+    await page.getByPlaceholder("Məhsul axtar...").fill("Kola");
+    await page.waitForTimeout(400);
     await shot("kassa-axtaris");
+    await page.getByRole("button", { name: /Kola 1L/ }).first().click();
+    await page.getByPlaceholder("Məhsul axtar...").fill("Çörək");
+    await page.waitForTimeout(300);
+    await page.getByRole("button", { name: /Kənd çörəyi/ }).first().click();
+    await shot("kassa-sebet");
+    await page.getByRole("button", { name: /SATIŞ ET/ }).click();
+    await page.waitForTimeout(500);
+    await shot("kassa-odenis");
+    await page.keyboard.press("Escape");
+    const cancel = page.getByRole("button", { name: /Ləğv et|Bağla/ }).first();
+    if (await cancel.isVisible().catch(() => false)) await cancel.click();
   });
   await step("admin-giris", async () => {
     await page.getByRole("button", { name: "Admin", exact: true }).click();

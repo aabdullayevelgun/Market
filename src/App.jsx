@@ -1733,9 +1733,14 @@ function KassaView({ role, activeShift, onEndShift }) {
   return (
     <div className="min-h-screen bg-[#f4f6f5] font-sans text-[#1a2b22]">
       {/* Header */}
-      <div className="bg-gradient-to-r from-[#08281f] to-[#0e3a2b] px-6 py-3 flex items-center gap-4">
-        <Logo size="sm" />
-        <div className="flex-1 relative max-w-2xl">
+      <div className="bg-gradient-to-r from-[#08281f] to-[#0e3a2b] px-3 md:px-6 py-3 flex flex-wrap md:flex-nowrap items-center gap-2 md:gap-4">
+        <div className="hidden md:block">
+          <Logo size="sm" />
+        </div>
+        <div className="md:hidden">
+          <Logo size="sm" showText={false} />
+        </div>
+        <div className="order-last basis-full md:order-none md:basis-auto flex-1 relative max-w-2xl">
           <div className="bg-white rounded-xl flex items-center gap-3 pl-4 pr-2 py-2.5">
             <Search size={18} className="text-gray-400 shrink-0" />
             <input
@@ -1758,7 +1763,7 @@ function KassaView({ role, activeShift, onEndShift }) {
             </div>
           )}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 ml-auto md:ml-0">
           <button
             onClick={() => setHistoryOpen(true)}
             title="Son çeklər"
@@ -1775,7 +1780,7 @@ function KassaView({ role, activeShift, onEndShift }) {
             <Receipt size={16} />
           </button>
           {activeShift && (
-            <div className="bg-white/10 rounded-full pl-3 pr-4 py-2 flex items-center gap-2 text-white">
+            <div className="hidden md:flex bg-white/10 rounded-full pl-3 pr-4 py-2 items-center gap-2 text-white">
               <User size={16} />
               <span className="text-sm font-semibold">{activeShift.kassir}</span>
             </div>
@@ -1783,7 +1788,7 @@ function KassaView({ role, activeShift, onEndShift }) {
           {activeShift && onEndShift && (
             <button
               onClick={onEndShift}
-              className="bg-red-500/20 hover:bg-red-500/30 text-red-100 rounded-full px-4 py-2 text-sm font-semibold"
+              className="bg-red-500/20 hover:bg-red-500/30 text-red-100 rounded-full px-3 md:px-4 py-2 text-xs md:text-sm font-semibold whitespace-nowrap"
             >
               Növbəni bitir
             </button>
@@ -1802,7 +1807,7 @@ function KassaView({ role, activeShift, onEndShift }) {
         </div>
       )}
 
-      <div className="p-6 grid grid-cols-[1fr_320px] gap-5" style={{ minHeight: "calc(100vh - 68px)" }}>
+      <div className="p-3 pb-20 md:p-6 grid grid-cols-1 md:grid-cols-[1fr_320px] gap-3 md:gap-5" style={{ minHeight: "calc(100vh - 68px)" }}>
         {/* Left/center: the cart — now the big, primary area */}
         <div className="bg-white rounded-2xl border border-gray-200 flex flex-col">
           <div className="px-6 py-4 flex items-center justify-between border-b border-gray-100">
@@ -1818,8 +1823,8 @@ function KassaView({ role, activeShift, onEndShift }) {
           </div>
 
           {query.trim() && matches.length > 0 && (
-            <div className="border-b border-gray-100 px-6 py-4">
-              <div className="grid grid-cols-3 gap-3">
+            <div className="border-b border-gray-100 px-3 md:px-6 py-4">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 {matches.map((p) => (
                   <button
                     key={p.kod}
@@ -1843,9 +1848,9 @@ function KassaView({ role, activeShift, onEndShift }) {
             </div>
           )}
 
-          <div className="flex-1 overflow-auto px-6 py-3 space-y-1">
+          <div className="flex-1 overflow-auto px-3 md:px-6 py-3 space-y-1">
             {cart.length === 0 && (
-              <div className="h-full min-h-[300px] flex flex-col items-center justify-center text-center">
+              <div className="h-full min-h-[160px] md:min-h-[300px] flex flex-col items-center justify-center text-center">
                 <ShoppingCart size={72} className="text-gray-200 mb-4" strokeWidth={1.2} />
                 <div className="text-gray-400 text-sm leading-relaxed">
                   Səbət boşdur — sağdakı siyahıdan məhsul seçin,<br />
@@ -1887,7 +1892,7 @@ function KassaView({ role, activeShift, onEndShift }) {
             ))}
           </div>
 
-          <div className="px-6 py-4 border-t border-gray-100 space-y-2.5">
+          <div className="px-4 md:px-6 py-4 border-t border-gray-100 space-y-2.5">
             <div className="flex items-center justify-between text-sm">
               <span className="text-gray-500">Ara məbləğ</span>
               <span className="font-semibold">{fmt(subtotal)} AZN</span>
@@ -6609,7 +6614,7 @@ function AdminView({ onResetRole }) {
           <div className="font-mono text-sm font-bold text-[#fbbf24] tracking-widest">{netToken || "—"}</div>
         </div>
       </div>
-      <div className="flex-1 min-w-0 p-3 md:p-6 overflow-auto">
+      <div className="flex-1 min-w-0 p-3 pb-20 md:p-6 overflow-auto">
         <button
           onClick={() => setMenuOpen(true)}
           className="md:hidden mb-3 flex items-center gap-2 bg-[#15803d] text-white rounded-xl px-3 py-2 text-sm font-bold shadow"
@@ -6800,7 +6805,7 @@ function Inner({ role, app, setApp, onResetRole }) {
       <ConnectionBanner connected={connected} pendingCount={pendingCount} pendingStockCount={pendingStockCount} />
       {role === "admin" && (
         <div
-          className="fixed right-3 z-[60] bg-white shadow-lg rounded-full p-1 flex gap-1 border border-gray-200 transition-[top]"
+          className="fixed right-3 z-[60] bg-white shadow-lg rounded-full p-1 flex gap-1 border border-gray-200 transition-[top] max-md:!top-auto max-md:bottom-3"
           style={{ top: connected && !pendingCount && !pendingStockCount ? "12px" : "48px" }}
         >
           <button
