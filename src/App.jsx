@@ -15,6 +15,17 @@ import { BarcodeFormat, DecodeHintType, NotFoundException } from "@zxing/library
 /* Shared mock data                                                  */
 /* ---------------------------------------------------------------- */
 
+// Offline demo build (VITE_DEMO=1, see src/demo/): no server, invented data,
+// every password is DEMO_PW.
+const DEMO = import.meta.env.VITE_DEMO === "1";
+const DEMO_PW = "123123";
+const resetDemo = () => {
+  Object.keys(localStorage)
+    .filter((k) => k.startsWith("zehra_"))
+    .forEach((k) => localStorage.removeItem(k));
+  window.location.reload();
+};
+
 const TODAY_STR = "21.08.2026"; // only used for the built-in demo/seed data below
 
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -1004,6 +1015,55 @@ function RoleSetup({ onDone }) {
   );
 }
 
+function DemoRoleSetup({ onDone }) {
+  return (
+    <div className="min-h-screen bg-[#f4f6f5] flex items-center justify-center p-5">
+      <div className="bg-white rounded-3xl shadow-lg border border-gray-200 p-6 w-full max-w-md">
+        <div className="flex justify-center mb-5">
+          <Logo />
+        </div>
+        <div className="text-center mb-5">
+          <div className="inline-block bg-orange-100 text-orange-700 text-[11px] font-black tracking-widest rounded-full px-3 py-1 mb-3">
+            DEMO VERSİYA
+          </div>
+          <div className="font-black text-lg">Nəyi göstərmək istəyirsiniz?</div>
+          <div className="text-sm text-gray-400 mt-1">
+            İnternet və server lazım deyil. Bütün məlumatlar nümunədir. Hər yerdə şifrə: <b className="text-gray-700">{DEMO_PW}</b>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <button
+            onClick={() => onDone("admin", "http://demo.local", "DEMO")}
+            className="w-full border-2 border-[#16a34a] bg-green-50 rounded-2xl p-4 text-left hover:bg-green-100"
+          >
+            <div className="font-bold text-[#166534]">🛒 Kassa + Admin paneli</div>
+            <div className="text-xs text-gray-500 mt-1">
+              Satış, çek, növbə; məhsullar, stok, hesabatlar, işçilər, təchizatçılar.
+            </div>
+          </button>
+          <button
+            onClick={() => onDone("scanner", "http://demo.local", "DEMO", DEMO_PW)}
+            className="w-full border-2 border-gray-200 rounded-2xl p-4 text-left hover:border-gray-300"
+          >
+            <div className="font-bold">📱 Telefon (Skaner)</div>
+            <div className="text-xs text-gray-500 mt-1">
+              Kamera ilə barkod oxuma: stok sayımı, mal qəbulu, düzəliş, qiymət yoxlama.
+            </div>
+          </button>
+        </div>
+        <button
+          onClick={() => {
+            if (window.confirm("Bütün demo dəyişiklikləri silinsin və nümunə məlumatlar yenidən yüklənsin?")) resetDemo();
+          }}
+          className="w-full mt-5 text-xs font-semibold text-gray-400 hover:text-gray-600 py-2"
+        >
+          Demo məlumatlarını sıfırla
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------------- */
 /* Small shared UI helpers                                           */
 /* ---------------------------------------------------------------- */
@@ -1169,6 +1229,7 @@ function KassaShiftGate({ role }) {
           <div className="text-center mb-6">
             <div className="font-black text-lg">Növbəyə başla</div>
             <div className="text-sm text-gray-400 mt-1">Adınızı seçib şifrənizi daxil edin.</div>
+            {DEMO && <div className="text-xs font-semibold text-orange-600 mt-2">Demo: istənilən kassiri seçin, şifrə {DEMO_PW}</div>}
           </div>
           {closedShift && (
             <div className="bg-green-50 border border-green-200 rounded-2xl p-4 mb-4 text-sm text-green-700">
@@ -6492,6 +6553,9 @@ const PAGES = {
 
 function AdminView({ onResetRole }) {
   const [active, setActive] = useState("icmal");
+  // Phones: the sidebar is a slide-in drawer behind a menu button instead
+  // of a permanent 240px column (which left ~140px for the page itself).
+  const [menuOpen, setMenuOpen] = useState(false);
   const [ip, setIp] = useState(null);
   const [netToken, setNetToken] = useState(null);
   const Page = PAGES[active];
@@ -6511,7 +6575,12 @@ function AdminView({ onResetRole }) {
 
   return (
     <div className="min-h-screen bg-[#f4f6f5] flex font-sans text-[#1a2b22]">
-      <div className="w-60 bg-[#15803d] text-white flex flex-col shrink-0">
+      {menuOpen && <div className="fixed inset-0 bg-black/40 z-[65] md:hidden" onClick={() => setMenuOpen(false)} />}
+      <div
+        className={`w-60 bg-[#15803d] text-white flex-col shrink-0 ${
+          menuOpen ? "flex fixed inset-y-0 left-0 z-[70] overflow-y-auto" : "hidden"
+        } md:flex md:static md:z-auto`}
+      >
         <div className="px-5 py-5 border-b border-white/10 flex justify-center">
           <Logo size="sm" />
         </div>
@@ -6519,7 +6588,10 @@ function AdminView({ onResetRole }) {
           {NAV.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
-              onClick={() => setActive(key)}
+              onClick={() => {
+                setActive(key);
+                setMenuOpen(false);
+              }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition ${
                 active === key ? "bg-[#16a34a]/25 text-white" : "text-white/45 hover:text-white/75"
               }`}
@@ -6537,7 +6609,13 @@ function AdminView({ onResetRole }) {
           <div className="font-mono text-sm font-bold text-[#fbbf24] tracking-widest">{netToken || "—"}</div>
         </div>
       </div>
-      <div className="flex-1 p-6 overflow-auto">
+      <div className="flex-1 min-w-0 p-3 md:p-6 overflow-auto">
+        <button
+          onClick={() => setMenuOpen(true)}
+          className="md:hidden mb-3 flex items-center gap-2 bg-[#15803d] text-white rounded-xl px-3 py-2 text-sm font-bold shadow"
+        >
+          <LayoutGrid size={16} /> Menyu · {(NAV.find((n) => n.key === active) || {}).label}
+        </button>
         <Page onNavigate={setActive} onResetRole={onResetRole} />
       </div>
     </div>
@@ -6743,6 +6821,7 @@ function Inner({ role, app, setApp, onResetRole }) {
         <Modal title="Admin panelinə giriş" onClose={() => setPwOpen(false)} widthClass="max-w-sm">
           <div className="space-y-4">
             <div className="text-sm text-gray-500">Admin panelinə keçmək üçün şifrəni daxil edin.</div>
+            {DEMO && <div className="text-xs font-semibold text-orange-600">Demo şifrə: {DEMO_PW}</div>}
             <FormField
               label="Şifrə"
               type="password"
@@ -6767,6 +6846,14 @@ function Inner({ role, app, setApp, onResetRole }) {
         </Modal>
       )}
       {role === "admin" ? (app === "kassa" ? <KassaShiftGate role={role} /> : <AdminView onResetRole={onResetRole} />) : <KassaShiftGate role={role} />}
+      {DEMO && (
+        <button
+          onClick={onResetRole}
+          className="fixed bottom-3 left-3 z-[60] bg-orange-500/90 text-white text-[11px] font-black tracking-wide rounded-full px-3 py-1.5 shadow-lg"
+        >
+          DEMO · Menyu
+        </button>
+      )}
     </div>
   );
 }
@@ -6774,7 +6861,8 @@ function Inner({ role, app, setApp, onResetRole }) {
 export default function App() {
   const { role, serverUrl, token, scannerPw, setRole, reset } = useDeviceRole();
   if (!role) {
-    return <RoleSetup onDone={(r, url, tok, pw) => setRole(r, url, tok, pw)} />;
+    const Setup = DEMO ? DemoRoleSetup : RoleSetup;
+    return <Setup onDone={(r, url, tok, pw) => setRole(r, url, tok, pw)} />;
   }
   if (role === "scanner") {
     return <TelefonSkanerApp serverUrl={serverUrl} token={token} adminPw={scannerPw} onResetRole={reset} />;

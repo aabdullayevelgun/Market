@@ -5,8 +5,15 @@ on:
     branches: [main, apk-build]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [normal, demo]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -28,11 +35,30 @@ jobs:
 
       - name: Build web app
         run: npm run build
+        env:
+          VITE_DEMO: ${{ matrix.variant == 'demo' && '1' || '' }}
+
+      # Offline demo: its own app id and name, so it installs next to the
+      # real Zəhra Skaner instead of replacing it.
+      - name: Rename demo app
+        if: matrix.variant == 'demo'
+        run: |
+          sed -i 's/applicationId "az.zehramarket.skaner"/applicationId "az.zehramarket.demo"/' android/app/build.gradle
+          sed -i 's|<string name="app_name">.*</string>|<string name="app_name">Zəhra Market Demo</string>|; s|<string name="title_activity_main">.*</string>|<string name="title_activity_main">Zəhra Market Demo</string>|' android/app/src/main/res/values/strings.xml
+
+      - name: Demo screenshots (phone size)
+        if: matrix.variant == 'demo'
+        run: |
+          npx vite preview --port 4173 --strictPort &
+          npm install --prefix "$RUNNER_TEMP/pw" playwright@1 > /dev/null
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium > /dev/null
+          npx wait-on http://localhost:4173
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node .github/scripts/demo-screens.cjs http://localhost:4173 "$RUNNER_TEMP/out/screens"
 
       - name: Sync Capacitor
         run: npx cap sync android
 
-      - name: Build debug APK
+      - name: Build APK
         working-directory: android
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
@@ -42,5 +68,19 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v5
         with:
-          name: zehra-skaner-demo-apk
+          name: zehra-${{ matrix.variant }}-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      # Also published on a throwaway "demo-build" branch (APK + screenshots),
+      # which is easier to grab than a zipped workflow artifact.
+      - name: Publish demo build to branch
+        if: matrix.variant == 'demo'
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/out/ZehraMarket-Demo.apk"
+          cd "$RUNNER_TEMP/out"
+          git init -q -b demo-build
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Demo APK + screenshots for ${GITHUB_SHA::7}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" demo-build
