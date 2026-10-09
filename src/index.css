@@ -28,3 +28,24 @@
     font-weight: 700 !important;
   }
 }
+/* Phone-width Admin panel (the offline demo APK, or the app opened on a
+   phone). Desktop layout is untouched. Tables keep one line per cell and
+   scroll sideways instead of squeezing every column into a word-per-line
+   stack; card headers holding filters wrap instead of overflowing. */
+@media (max-width: 767px) {
+  .admin-content div:has(> table) {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  .admin-content th,
+  .admin-content td {
+    white-space: nowrap;
+  }
+  .admin-content .justify-between:has(select) {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .admin-content .justify-between:has(select) > div {
+    flex-wrap: wrap;
+  }
+}

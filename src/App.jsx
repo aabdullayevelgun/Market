@@ -1068,6 +1068,20 @@ function DemoRoleSetup({ onDone }) {
 /* Small shared UI helpers                                           */
 /* ---------------------------------------------------------------- */
 
+// True on phone-width screens (Tailwind's md breakpoint), for the few spots
+// where a layout change can't be done with CSS classes alone.
+const PHONE_QUERY = "(max-width: 767px)";
+function useIsPhone() {
+  const [isPhone, setIsPhone] = useState(() => typeof window !== "undefined" && window.matchMedia(PHONE_QUERY).matches);
+  React.useEffect(() => {
+    const mq = window.matchMedia(PHONE_QUERY);
+    const onChange = () => setIsPhone(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return isPhone;
+}
+
 function Logo({ size = "md", showText = true }) {
   const box = size === "sm" ? 46 : size === "xs" ? 22 : 56;
   const text = size === "sm" ? "text-xl" : "text-2xl";
@@ -1317,6 +1331,7 @@ function KassaShiftGate({ role }) {
 /* ---------------------------------------------------------------- */
 
 function KassaView({ role, activeShift, onEndShift }) {
+  const isPhone = useIsPhone();
   const canDiscount = role !== "kassa";
   const { products, sales, addSale, returnSale, settings, updateProduct, adminPw, setAdminPw } = useMarket();
   const [returningNo, setReturningNo] = useState(null);
@@ -1734,12 +1749,7 @@ function KassaView({ role, activeShift, onEndShift }) {
     <div className="min-h-screen bg-[#f4f6f5] font-sans text-[#1a2b22]">
       {/* Header */}
       <div className="bg-gradient-to-r from-[#08281f] to-[#0e3a2b] px-3 md:px-6 py-3 flex flex-wrap md:flex-nowrap items-center gap-2 md:gap-4">
-        <div className="hidden md:block">
-          <Logo size="sm" />
-        </div>
-        <div className="md:hidden">
-          <Logo size="sm" showText={false} />
-        </div>
+        <Logo size="sm" showText={!isPhone} />
         <div className="order-last basis-full md:order-none md:basis-auto flex-1 relative max-w-2xl">
           <div className="bg-white rounded-xl flex items-center gap-3 pl-4 pr-2 py-2.5">
             <Search size={18} className="text-gray-400 shrink-0" />
@@ -2643,7 +2653,7 @@ function PageHeader({ title }) {
   return (
     <div className="flex items-center justify-between mb-5">
       <h1 className="text-xl font-black text-[#12261d]">{title}</h1>
-      <div className="flex items-center gap-3">
+      <div className="hidden md:flex items-center gap-3">
         <div className="text-right leading-tight">
           <div className="text-sm font-semibold">Zəhra Market</div>
           <div className="text-xs text-gray-400">Admin</div>
@@ -2699,7 +2709,7 @@ function IcmalPage({ onNavigate }) {
   return (
     <div>
       <PageHeader title="İcmal" />
-      <div className="grid grid-cols-3 gap-4 mb-5">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4 mb-5">
         <StatCard label="Bu gün satış" value={`${fmt(bugunMeblegh)} AZN`} sub={`${bugunSales.length} satış`} icon={TrendingUp} tone="green" />
         <StatCard label="Stok dəyəri" value={`${fmt(stokDeyeri)} AZN`} sub="Anbar üzrə" icon={Boxes} tone="amber" />
         <StatCard
@@ -2712,7 +2722,7 @@ function IcmalPage({ onNavigate }) {
         />
       </div>
 
-      <div className="grid grid-cols-[1.4fr_1fr] gap-4 mb-5">
+      <div className="grid grid-cols-1 md:grid-cols-[1.4fr_1fr] gap-4 mb-5">
         <div className="bg-white rounded-2xl border border-gray-200 p-5">
           <div className="text-sm font-bold text-gray-600 mb-3">SATIŞLAR — SON 7 GÜN</div>
           <div className="h-48">
@@ -2996,8 +3006,8 @@ function MehsullarPage() {
           {importMsg.text}
         </div>
       )}
-      <div className="flex items-center gap-3 mb-4">
-        <div className="flex-1 flex items-center gap-2 bg-white border border-gray-200 rounded-xl px-4 py-2.5">
+      <div className="flex flex-wrap md:flex-nowrap items-center gap-3 mb-4">
+        <div className="basis-full md:basis-auto flex-1 flex items-center gap-2 bg-white border border-gray-200 rounded-xl px-4 py-2.5">
           <Search size={16} className="text-gray-400" />
           <input
             value={q}
@@ -3403,7 +3413,7 @@ function StokPage() {
   return (
     <div>
       <PageHeader title="Stok" />
-      <div className="grid grid-cols-4 gap-4 mb-5">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-5">
         <StatCard
           label="Ümumi stok"
           value={`${totalUnitsEded.toLocaleString("az-AZ")} ədəd`}
@@ -4099,7 +4109,7 @@ function HesabatlarPage() {
           {resetMsg.text}
         </div>
       )}
-      <div className="grid grid-cols-3 gap-4 mb-5">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4 mb-5">
         <div className="bg-white rounded-2xl border border-gray-200 p-5">
           <div className="text-xs text-gray-500 font-medium">GÜNLÜK DÖVRİYYƏ</div>
           <div className="text-2xl font-black mt-1">{fmt(dovriyye)} AZN</div>
@@ -4125,7 +4135,7 @@ function HesabatlarPage() {
           <div className="text-xs text-gray-400 mt-1">təxmini (bu gün)</div>
         </div>
       </div>
-      <div className="grid grid-cols-[1.4fr_1fr] gap-4 mb-4">
+      <div className="grid grid-cols-1 md:grid-cols-[1.4fr_1fr] gap-4 mb-4">
         <div className="bg-white rounded-2xl border border-gray-200 p-5">
           <div className="text-sm font-bold text-gray-600 mb-3">GÜNLƏR ÜZRƏ SATIŞ</div>
           <div className="h-48">
@@ -6163,7 +6173,7 @@ function BackupPage() {
           {msg.text}
         </div>
       )}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-white rounded-2xl border border-gray-200 p-6">
           <div className="w-11 h-11 rounded-xl bg-green-50 flex items-center justify-center mb-4">
             <Download size={20} className="text-[#16a34a]" />
@@ -6301,7 +6311,7 @@ function ParametrlerPage({ onResetRole }) {
       </div>
       <div className="bg-white rounded-2xl border border-gray-200 p-5 mb-4">
         <div className="text-sm font-bold text-gray-600 mb-4">MAĞAZA PARAMETRLƏRİ</div>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <FormField label="Mağaza adı" value={draft.magazaAdi} onChange={(e) => setDraft({ ...draft, magazaAdi: e.target.value })} />
           <FormField label="VÖEN" value={draft.voen} onChange={(e) => setDraft({ ...draft, voen: e.target.value })} />
           <FormField label="Telefon" value={draft.telefon} onChange={(e) => setDraft({ ...draft, telefon: e.target.value })} />
@@ -6338,7 +6348,7 @@ function ParametrlerPage({ onResetRole }) {
         <div className="text-xs text-gray-400 mb-4">
           Hər satışda terminala eKassam-ın rəsmi API-si (şəbəkə üzərindən) ilə göndərilir. Açar (key) terminalın öz Ayarlar ekranında yazılanla EYNİ olmalıdır.
         </div>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <label className="flex items-center gap-2 text-sm text-gray-600">
             <input
               type="checkbox"
@@ -6394,7 +6404,7 @@ function ParametrlerPage({ onResetRole }) {
       <div className="bg-white rounded-2xl border border-gray-200 p-5 mb-4">
         <div className="text-sm font-bold text-gray-600 mb-1">TƏHLÜKƏSİZLİK</div>
         <div className="text-xs text-gray-400 mb-4">Admin panelinə keçərkən (Kassa → Admin düyməsi) bu şifrə tələb olunur.</div>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <FormField
             label="Admin şifrəsi"
             value={draft.adminSifre}
@@ -6405,7 +6415,7 @@ function ParametrlerPage({ onResetRole }) {
       <div className="bg-white rounded-2xl border border-gray-200 p-5 mb-4">
         <div className="text-sm font-bold text-gray-600 mb-1">TƏRƏZİ</div>
         <div className="text-xs text-gray-400 mb-4">Barkod çap edən tərəzinin barkod prefiksi. Etiketi skan edib nəticə səhv çıxsa, bu rəqəmi tərəzinin real formatına uyğun dəyişin.</div>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <FormField label="Tərəzi barkod prefiksi" value={draft.tereziPrefiks} onChange={(e) => setDraft({ ...draft, tereziPrefiks: e.target.value })} />
         </div>
       </div>
@@ -6614,7 +6624,7 @@ function AdminView({ onResetRole }) {
           <div className="font-mono text-sm font-bold text-[#fbbf24] tracking-widest">{netToken || "—"}</div>
         </div>
       </div>
-      <div className="flex-1 min-w-0 p-3 pb-20 md:p-6 overflow-auto">
+      <div className="admin-content flex-1 min-w-0 p-3 pb-20 md:p-6 overflow-auto">
         <button
           onClick={() => setMenuOpen(true)}
           className="md:hidden mb-3 flex items-center gap-2 bg-[#15803d] text-white rounded-xl px-3 py-2 text-sm font-bold shadow"
